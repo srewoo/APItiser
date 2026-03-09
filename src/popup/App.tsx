@@ -74,7 +74,9 @@ export function App() {
   const [openApiFallbackInput, setOpenApiFallbackInput] = useState<string>('');
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [contextId, setContextId] = useState<string>('global');
+  const [selectedEndpointIds, setSelectedEndpointIds] = useState<string[]>([]);
   const contextRef = useRef<string>('global');
+  const endpointSelectionSeedRef = useRef<string>('');
 
   const activeOrLatestJob = useMemo(() => {
     if (!appState) {
@@ -86,10 +88,24 @@ export function App() {
   const selectedProvider = appState?.settings.provider ?? 'openai';
   const availableModels = PROVIDER_MODELS[selectedProvider];
   const latestMetric = appState?.metricsHistory?.[0];
+  const endpoints = activeOrLatestJob?.endpoints ?? [];
+  const endpointIds = useMemo(() => endpoints.map((endpoint) => endpoint.id), [endpoints]);
+  const endpointSignature = useMemo(() => endpointIds.join('|'), [endpointIds]);
+  const selectedEndpointSet = useMemo(() => new Set(selectedEndpointIds), [selectedEndpointIds]);
+  const selectedEndpointCount = useMemo(
+    () => endpointIds.filter((endpointId) => selectedEndpointSet.has(endpointId)).length,
+    [endpointIds, selectedEndpointSet]
+  );
   const existingCoveredSet = useMemo(
     () => new Set(activeOrLatestJob?.existingTestEndpointIds ?? []),
     [activeOrLatestJob?.existingTestEndpointIds]
   );
+  const selectedEligibleCount = useMemo(() => {
+    if (!appState?.settings.skipExistingTests) {
+      return selectedEndpointCount;
+    }
+    return endpoints.filter((endpoint) => selectedEndpointSet.has(endpoint.id) && !existingCoveredSet.has(endpoint.id)).length;
+  }, [appState?.settings.skipExistingTests, endpoints, existingCoveredSet, selectedEndpointCount, selectedEndpointSet]);
 
   const resolveActiveTab = async (gitlabBaseUrl?: string) => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -204,6 +220,27 @@ export function App() {
     return () => window.removeEventListener('keydown', handleEscape);
   }, [settingsOpen]);
 
+  useEffect(() => {
+    if (!endpointIds.length) {
+      endpointSelectionSeedRef.current = '';
+      setSelectedEndpointIds([]);
+      return;
+    }
+
+    const seed = `${contextId}|${activeOrLatestJob?.jobId ?? 'none'}|${endpointSignature}`;
+    if (endpointSelectionSeedRef.current !== seed) {
+      endpointSelectionSeedRef.current = seed;
+      setSelectedEndpointIds(endpointIds);
+      return;
+    }
+
+    const validEndpointIds = new Set(endpointIds);
+    setSelectedEndpointIds((current) => {
+      const valid = current.filter((endpointId) => validEndpointIds.has(endpointId));
+      return valid.length === current.length ? current : valid;
+    });
+  }, [activeOrLatestJob?.jobId, contextId, endpointIds, endpointSignature]);
+
   const patchSettings = async (patch: Partial<AppState['settings']>) => {
     setError('');
     const response = await sendCommand<EventMessage>({
@@ -314,14 +351,47 @@ export function App() {
   };
 
   const handleGenerate = async () => {
+    const selectedForGeneration = endpoints
+      .filter((endpoint) => selectedEndpointSet.has(endpoint.id))
+      .map((endpoint) => endpoint.id);
+
+    if (!selectedForGeneration.length) {
+      setError('Select at least one endpoint to generate tests.');
+      return;
+    }
+
     setError('');
     setNotice('Generating tests...');
-    const response = await sendCommand<EventMessage>({ type: 'START_GENERATION', contextId });
+    const response = await sendCommand<EventMessage>({
+      type: 'START_GENERATION',
+      payload: { selectedEndpointIds: selectedForGeneration },
+      contextId
+    });
     if (response.type === 'JOB_ERROR') {
       setError(response.error);
       return;
     }
     setNotice('Generation complete. Download your suite.');
+  };
+
+  const handleEndpointToggle = (endpointId: string, checked: boolean) => {
+    setSelectedEndpointIds((current) => {
+      if (checked) {
+        if (current.includes(endpointId)) {
+          return current;
+        }
+        return [...current, endpointId];
+      }
+      return current.filter((value) => value !== endpointId);
+    });
+  };
+
+  const handleSelectAllEndpoints = () => {
+    setSelectedEndpointIds(endpointIds);
+  };
+
+  const handleClearAllEndpoints = () => {
+    setSelectedEndpointIds([]);
   };
 
   const handleClear = async () => {
@@ -655,28 +725,54 @@ export function App() {
           {activeOrLatestJob?.existingTestEndpointIds?.length ?? 0} already tested •{' '}
           {activeOrLatestJob?.eligibleEndpointCount ?? activeOrLatestJob?.totalEndpoints ?? 0} to generate
         </p>
-        <div className="endpoint-list">
-          {(activeOrLatestJob?.endpoints ?? []).slice(0, 8).map((endpoint) => (
-            <div key={endpoint.id} className="endpoint-row">
-              <code>{endpoint.method}</code>
-              <span>{endpoint.path}</span>
-              <div className="endpoint-badges">
-                {endpoint.confidence ? (
-                  <em
-                    className="endpoint-tag"
-                    title={endpoint.evidence?.[0]?.reason ? `Evidence: ${endpoint.evidence[0].reason}` : 'Detection confidence'}
-                  >
-                    {Math.round(endpoint.confidence * 100)}% conf
-                  </em>
-                ) : null}
-                {existingCoveredSet.has(endpoint.id) ? <em className="endpoint-tag">existing test</em> : null}
+        {endpoints.length ? (
+          <>
+            <div className="endpoint-controls">
+              <p className="subtle">
+                {selectedEndpointCount} selected • {selectedEligibleCount} selected for generation
+              </p>
+              <div className="endpoint-control-actions">
+                <button type="button" className="ghost endpoint-control-btn" onClick={handleSelectAllEndpoints} disabled={busy}>
+                  Select All
+                </button>
+                <button type="button" className="ghost endpoint-control-btn" onClick={handleClearAllEndpoints} disabled={busy}>
+                  Clear All
+                </button>
               </div>
             </div>
-          ))}
-          {(activeOrLatestJob?.endpoints?.length ?? 0) > 8 ? (
-            <p className="subtle">+ {(activeOrLatestJob?.endpoints?.length ?? 0) - 8} more endpoints</p>
-          ) : null}
-        </div>
+            <div className="endpoint-list endpoint-list-scroll">
+              {endpoints.map((endpoint) => {
+                const checked = selectedEndpointSet.has(endpoint.id);
+                return (
+                  <label key={endpoint.id} className={`endpoint-row ${checked ? 'checked' : 'unchecked'}`}>
+                    <input
+                      className="endpoint-checkbox"
+                      type="checkbox"
+                      checked={checked}
+                      disabled={busy}
+                      onChange={(event) => handleEndpointToggle(endpoint.id, event.target.checked)}
+                    />
+                    <code>{endpoint.method}</code>
+                    <span>{endpoint.path}</span>
+                    <div className="endpoint-badges">
+                      {endpoint.confidence ? (
+                        <em
+                          className="endpoint-tag"
+                          title={endpoint.evidence?.[0]?.reason ? `Evidence: ${endpoint.evidence[0].reason}` : 'Detection confidence'}
+                        >
+                          {Math.round(endpoint.confidence * 100)}% conf
+                        </em>
+                      ) : null}
+                      {existingCoveredSet.has(endpoint.id) ? <em className="endpoint-tag">existing test</em> : null}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <p className="subtle">No endpoints yet. Run Scan Repo to populate this list.</p>
+        )}
       </section>
 
       <section className="panel">
@@ -732,7 +828,7 @@ export function App() {
         <button type="button" onClick={handleScan} disabled={busy || !repo}>
           Scan Repo
         </button>
-        <button type="button" onClick={handleGenerate} disabled={busy || !(activeOrLatestJob?.endpoints.length ?? 0)}>
+        <button type="button" onClick={handleGenerate} disabled={busy || !endpoints.length || !selectedEndpointCount}>
           Generate Tests
         </button>
         <button type="button" onClick={handleDownload} disabled={!appState?.artifacts.length}>

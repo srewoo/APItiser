@@ -451,7 +451,10 @@ const handleStartScan = async (command: Extract<CommandMessage, { type: 'START_S
   return await runScanPipeline(state, command.payload.repo, contextId);
 };
 
-const handleStartGeneration = async (contextId: string): Promise<AppState> => {
+const handleStartGeneration = async (
+  command: Extract<CommandMessage, { type: 'START_GENERATION' }>
+): Promise<AppState> => {
+  const contextId = resolveContextId(command.contextId);
   const state = await loadState(contextId);
   if (!state.activeJob?.repo || state.activeJob.endpoints.length === 0) {
     throw new Error('No scanned endpoints available. Run Scan Repo first.');
@@ -461,10 +464,16 @@ const handleStartGeneration = async (contextId: string): Promise<AppState> => {
     throw new Error('Generation is already in progress.');
   }
 
+  const selectedEndpointIds = command.payload?.selectedEndpointIds ?? [];
+  const selectedEndpointSet = selectedEndpointIds.length > 0 ? new Set(selectedEndpointIds) : null;
+  const selectedEndpoints = selectedEndpointSet
+    ? state.activeJob.endpoints.filter((endpoint) => selectedEndpointSet.has(endpoint.id))
+    : state.activeJob.endpoints;
+
   const existingCovered = new Set(state.activeJob.existingTestEndpointIds ?? []);
   const endpointsToGenerate = state.settings.skipExistingTests
-    ? state.activeJob.endpoints.filter((endpoint) => !existingCovered.has(endpoint.id))
-    : state.activeJob.endpoints;
+    ? selectedEndpoints.filter((endpoint) => !existingCovered.has(endpoint.id))
+    : selectedEndpoints;
 
   if (endpointsToGenerate.length > 0) {
     const key = requiredProviderKey(state);
@@ -675,7 +684,7 @@ chrome.runtime.onMessage.addListener((message: CommandMessage, _sender, sendResp
       }
 
       if (message.type === 'START_GENERATION') {
-        const next = await handleStartGeneration(contextId);
+        const next = await handleStartGeneration(message);
         sendResponse({ type: 'STATE_SNAPSHOT', payload: next, contextId } as EventMessage);
         return;
       }

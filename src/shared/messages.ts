@@ -5,7 +5,7 @@ export type CommandMessage =
   | { type: 'SAVE_SETTINGS'; payload: Partial<ExtensionSettings>; contextId?: string }
   | { type: 'VALIDATE_REPO_ACCESS'; payload: { repo: RepoRef }; contextId?: string }
   | { type: 'START_SCAN'; payload: { repo: RepoRef }; contextId?: string }
-  | { type: 'START_GENERATION'; contextId?: string }
+  | { type: 'START_GENERATION'; payload?: { selectedEndpointIds?: string[] }; contextId?: string }
   | { type: 'CANCEL_JOB'; contextId?: string }
   | { type: 'CLEAR_CONTEXT'; contextId?: string }
   | { type: 'DOWNLOAD_ARTIFACT'; payload: { artifactId: string }; contextId?: string };

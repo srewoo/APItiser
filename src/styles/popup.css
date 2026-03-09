@@ -375,15 +375,52 @@ textarea:focus {
   gap: 6px;
 }
 
+.endpoint-list-scroll {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.endpoint-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  margin-bottom: 8px;
+}
+
+.endpoint-control-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.endpoint-control-btn {
+  width: auto;
+  min-width: 86px;
+  padding: 6px 9px;
+  font-size: 11px;
+}
+
 .endpoint-row {
   display: grid;
-  grid-template-columns: 62px 1fr auto;
+  grid-template-columns: 20px 62px 1fr auto;
   align-items: center;
   gap: 8px;
   border: 1px solid rgba(41, 36, 28, 0.18);
   border-radius: 10px;
   padding: 8px;
   background: var(--surface-strong);
+}
+
+.endpoint-row.checked {
+  background: rgba(255, 253, 249, 0.95);
+}
+
+.endpoint-row.unchecked {
+  background: rgba(244, 241, 233, 0.8);
+  opacity: 0.75;
 }
 
 .endpoint-badges {
@@ -393,10 +430,20 @@ textarea:focus {
   justify-content: flex-end;
 }
 
+.endpoint-checkbox {
+  width: auto;
+  margin: 0;
+}
+
 .endpoint-row code {
   color: var(--accent);
   font-size: 11px;
   font-weight: 700;
+}
+
+.endpoint-row span {
+  min-width: 0;
+  word-break: break-word;
 }
 
 .endpoint-tag {
