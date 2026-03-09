@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>APItiser Help</title>
+    <style>
+      :root {
+        --bg: #f6f3ec;
+        --surface: #fffdf9;
+        --text: #1d1b18;
+        --muted: #69645c;
+        --line: rgba(39, 34, 27, 0.16);
+        --accent: #0b5f7a;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        padding: 32px 22px 48px;
+        background: radial-gradient(circle at 20% 10%, #fbf7ee, var(--bg));
+        color: var(--text);
+        font: 15px/1.55 "Avenir Next", "Segoe UI Variable", sans-serif;
+      }
+
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 24px;
+      }
+
+      h1,
+      h2 { font-family: "Baskerville", "Iowan Old Style", serif; margin: 0; }
+      h1 { font-size: 30px; line-height: 1.1; }
+      h2 { margin-top: 22px; font-size: 20px; }
+      p, li { color: var(--muted); }
+      ul { margin: 8px 0 0 20px; padding: 0; }
+      .badge {
+        display: inline-block;
+        margin-top: 10px;
+        border: 1px solid rgba(11, 95, 122, 0.3);
+        border-radius: 999px;
+        color: var(--accent);
+        background: rgba(11, 95, 122, 0.08);
+        padding: 4px 10px;
+        font-size: 12px;
+      }
+      code {
+        background: #f1ede4;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 1px 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>APItiser Help</h1>
+      <div class="badge">Scan -> Generate -> Download</div>
+
+      <h2>Quick Start</h2>
+      <ul>
+        <li>Open a GitHub or GitLab repository page in the active tab.</li>
+        <li>Open APItiser side panel and click <code>Scan Repo</code>.</li>
+        <li>Review detected endpoints, then click <code>Generate Tests</code>.</li>
+        <li>Click <code>Download Tests</code> to save the zip artifact.</li>
+      </ul>
+
+      <h2>Settings You Should Configure</h2>
+      <ul>
+        <li>Provider/model and API key (OpenAI, Claude, or Gemini).</li>
+        <li>Framework (Jest, Mocha + Chai, or Pytest).</li>
+        <li>Test file directories to skip already covered endpoints.</li>
+        <li>Optional OpenAPI fallback spec for missing static routes.</li>
+      </ul>
+
+      <h2>Context Behavior</h2>
+      <p>
+        APItiser stores context per page. Switching tabs/pages shows that page’s own scan, generated tests, and progress.
+      </p>
+
+      <h2>Clear Action</h2>
+      <p>
+        <code>Clear</code> removes the current page context: active job, history, generated tests, and artifacts for that page only.
+      </p>
+
+      <h2>Troubleshooting</h2>
+      <ul>
+        <li>If scan fails, validate repo access and token scopes in Settings.</li>
+        <li>If generation fails, check provider API key and model selection.</li>
+        <li>Reload the extension from <code>chrome://extensions</code> after updates.</li>
+      </ul>
+    </main>
+  </body>
+</html>

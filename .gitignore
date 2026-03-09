@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+coverage/
+*.tsbuildinfo
+
+# Extension packages
+*.zip
+apitiser-chrome-webstore.zip
+
+# Generated JS/DTs from TS config files
+vite.config.js
+vite.config.d.ts
+vitest.config.js
+vitest.config.d.ts
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+
+# Logs and system files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store

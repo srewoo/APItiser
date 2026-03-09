@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "APItiser",
+  "description": "AI-powered API test generation directly in your browser.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "APItiser",
+    "default_icon": {
+      "128": "icon-128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "128": "icon-128.png"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "tabs", "alarms", "downloads", "notifications", "sidePanel"],
+  "host_permissions": [
+    "https://api.github.com/*",
+    "https://gitlab.com/api/v4/*",
+    "https://*/api/v4/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ]
+}
