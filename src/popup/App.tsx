@@ -86,6 +86,7 @@ export function App() {
   }, [appState]);
 
   const selectedProvider = appState?.settings.provider ?? 'openai';
+  const skipExistingEnabled = appState?.settings.skipExistingTests ?? true;
   const availableModels = PROVIDER_MODELS[selectedProvider];
   const latestMetric = appState?.metricsHistory?.[0];
   const endpoints = activeOrLatestJob?.endpoints ?? [];
@@ -101,11 +102,11 @@ export function App() {
     [activeOrLatestJob?.existingTestEndpointIds]
   );
   const selectedEligibleCount = useMemo(() => {
-    if (!appState?.settings.skipExistingTests) {
+    if (!skipExistingEnabled) {
       return selectedEndpointCount;
     }
     return endpoints.filter((endpoint) => selectedEndpointSet.has(endpoint.id) && !existingCoveredSet.has(endpoint.id)).length;
-  }, [appState?.settings.skipExistingTests, endpoints, existingCoveredSet, selectedEndpointCount, selectedEndpointSet]);
+  }, [skipExistingEnabled, endpoints, existingCoveredSet, selectedEndpointCount, selectedEndpointSet]);
 
   const resolveActiveTab = async (gitlabBaseUrl?: string) => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -241,6 +242,16 @@ export function App() {
     });
   }, [activeOrLatestJob?.jobId, contextId, endpointIds, endpointSignature]);
 
+  useEffect(() => {
+    if (!skipExistingEnabled || !existingCoveredSet.size) {
+      return;
+    }
+    setSelectedEndpointIds((current) => {
+      const filtered = current.filter((endpointId) => !existingCoveredSet.has(endpointId));
+      return filtered.length === current.length ? current : filtered;
+    });
+  }, [skipExistingEnabled, existingCoveredSet]);
+
   const patchSettings = async (patch: Partial<AppState['settings']>) => {
     setError('');
     const response = await sendCommand<EventMessage>({
@@ -353,10 +364,15 @@ export function App() {
   const handleGenerate = async () => {
     const selectedForGeneration = endpoints
       .filter((endpoint) => selectedEndpointSet.has(endpoint.id))
+      .filter((endpoint) => !skipExistingEnabled || !existingCoveredSet.has(endpoint.id))
       .map((endpoint) => endpoint.id);
 
     if (!selectedForGeneration.length) {
-      setError('Select at least one endpoint to generate tests.');
+      if (skipExistingEnabled && selectedEndpointCount > 0) {
+        setError('All selected endpoints are already covered by existing tests.');
+      } else {
+        setError('Select at least one endpoint to generate tests.');
+      }
       return;
     }
 
@@ -387,7 +403,15 @@ export function App() {
   };
 
   const handleSelectAllEndpoints = () => {
-    setSelectedEndpointIds(endpointIds);
+    if (!skipExistingEnabled) {
+      setSelectedEndpointIds(endpointIds);
+      return;
+    }
+
+    const eligibleIds = endpoints
+      .filter((endpoint) => !existingCoveredSet.has(endpoint.id))
+      .map((endpoint) => endpoint.id);
+    setSelectedEndpointIds(eligibleIds);
   };
 
   const handleClearAllEndpoints = () => {
@@ -632,7 +656,7 @@ export function App() {
           </label>
 
           <div className="category-row">
-            {(['positive', 'negative', 'edge'] as const).map((category) => (
+            {(['positive', 'negative', 'edge', 'security'] as const).map((category) => (
               <button
                 key={category}
                 type="button"
@@ -742,14 +766,15 @@ export function App() {
             </div>
             <div className="endpoint-list endpoint-list-scroll">
               {endpoints.map((endpoint) => {
-                const checked = selectedEndpointSet.has(endpoint.id);
+                const blockedBySkip = skipExistingEnabled && existingCoveredSet.has(endpoint.id);
+                const checked = selectedEndpointSet.has(endpoint.id) && !blockedBySkip;
                 return (
                   <label key={endpoint.id} className={`endpoint-row ${checked ? 'checked' : 'unchecked'}`}>
                     <input
                       className="endpoint-checkbox"
                       type="checkbox"
                       checked={checked}
-                      disabled={busy}
+                      disabled={busy || blockedBySkip}
                       onChange={(event) => handleEndpointToggle(endpoint.id, event.target.checked)}
                     />
                     <code>{endpoint.method}</code>
@@ -828,7 +853,11 @@ export function App() {
         <button type="button" onClick={handleScan} disabled={busy || !repo}>
           Scan Repo
         </button>
-        <button type="button" onClick={handleGenerate} disabled={busy || !endpoints.length || !selectedEndpointCount}>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          disabled={busy || !endpoints.length || (skipExistingEnabled ? !selectedEligibleCount : !selectedEndpointCount)}
+        >
           Generate Tests
         </button>
         <button type="button" onClick={handleDownload} disabled={!appState?.artifacts.length}>

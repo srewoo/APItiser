@@ -232,7 +232,12 @@ const finalizeGeneration = async (
   const artifact = await buildArtifactZip(state.settings.framework, files);
   const completedAt = Date.now();
 
-  const coverage = buildCoverage(packaging.endpoints, tests, packaging.existingTestEndpointIds ?? []);
+  const coverage = buildCoverage(
+    packaging.endpoints,
+    tests,
+    packaging.existingTestEndpointIds ?? [],
+    state.settings.includeCategories
+  );
 
   const complete: JobState = {
     ...packaging,
@@ -398,7 +403,12 @@ const runScanPipeline = async (
     const eligibleEndpointCount = state.settings.skipExistingTests
       ? Math.max(endpoints.length - existingTestEndpointIds.length, 0)
       : endpoints.length;
-    const preGenerationCoverage = buildCoverage(endpoints, [], existingTestEndpointIds);
+    const preGenerationCoverage = buildCoverage(
+      endpoints,
+      [],
+      existingTestEndpointIds,
+      state.settings.includeCategories
+    );
 
     if (isContextCleared(contextId)) {
       await stopKeepAlive();
@@ -464,10 +474,11 @@ const handleStartGeneration = async (
     throw new Error('Generation is already in progress.');
   }
 
+  const hasExplicitSelection = Array.isArray(command.payload?.selectedEndpointIds);
   const selectedEndpointIds = command.payload?.selectedEndpointIds ?? [];
-  const selectedEndpointSet = selectedEndpointIds.length > 0 ? new Set(selectedEndpointIds) : null;
-  const selectedEndpoints = selectedEndpointSet
-    ? state.activeJob.endpoints.filter((endpoint) => selectedEndpointSet.has(endpoint.id))
+  const selectedEndpointSet = hasExplicitSelection ? new Set(selectedEndpointIds) : null;
+  const selectedEndpoints = hasExplicitSelection
+    ? state.activeJob.endpoints.filter((endpoint) => selectedEndpointSet?.has(endpoint.id))
     : state.activeJob.endpoints;
 
   const existingCovered = new Set(state.activeJob.existingTestEndpointIds ?? []);

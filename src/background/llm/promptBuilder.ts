@@ -19,6 +19,9 @@ const categoriesAsSentence = (categories: TestCategory[]): string =>
       if (item === 'negative') {
         return 'negative cases';
       }
+      if (item === 'security') {
+        return 'security cases';
+      }
       return 'edge cases';
     })
     .join(', ');
@@ -30,7 +33,7 @@ export const buildPrompt = (batch: ApiEndpoint[], context: GenerateContext): str
     mustReturn: 'json-array',
     jsonSchema: {
       endpointId: 'string',
-      category: 'positive|negative|edge',
+      category: 'positive|negative|edge|security',
       title: 'string',
       request: {
         method: 'string',

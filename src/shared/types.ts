@@ -4,7 +4,7 @@ export type LLMProvider = 'openai' | 'claude' | 'gemini';
 
 export type TestFramework = 'jest' | 'pytest' | 'mocha';
 
-export type TestCategory = 'positive' | 'negative' | 'edge';
+export type TestCategory = 'positive' | 'negative' | 'edge' | 'security';
 
 export type JobStage =
   | 'idle'

@@ -3,7 +3,8 @@ import type { ApiEndpoint, CoverageSummary, GeneratedTestCase } from '@shared/ty
 export const buildCoverage = (
   endpoints: ApiEndpoint[],
   tests: GeneratedTestCase[],
-  existingCoveredEndpointIds: string[] = []
+  existingCoveredEndpointIds: string[] = [],
+  requiredCategories: Array<GeneratedTestCase['category']> = ['positive', 'negative', 'edge']
 ): CoverageSummary => {
   const testsByEndpoint = new Map<string, GeneratedTestCase[]>();
   const existingCovered = new Set(existingCoveredEndpointIds);
@@ -27,14 +28,17 @@ export const buildCoverage = (
 
     const endpointTests = testsByEndpoint.get(endpoint.id) ?? [];
     const categories = new Set(endpointTests.map((item) => item.category));
-    if (!categories.has('positive')) {
+    if (requiredCategories.includes('positive') && !categories.has('positive')) {
       gaps.push(`Missing positive tests for ${endpoint.method} ${endpoint.path}`);
     }
-    if (!categories.has('negative')) {
+    if (requiredCategories.includes('negative') && !categories.has('negative')) {
       gaps.push(`Missing negative tests for ${endpoint.method} ${endpoint.path}`);
     }
-    if (!categories.has('edge')) {
+    if (requiredCategories.includes('edge') && !categories.has('edge')) {
       gaps.push(`Missing edge tests for ${endpoint.method} ${endpoint.path}`);
+    }
+    if (requiredCategories.includes('security') && !categories.has('security')) {
+      gaps.push(`Missing security tests for ${endpoint.method} ${endpoint.path}`);
     }
   }
 

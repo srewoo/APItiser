@@ -27,4 +27,29 @@ describe('detectExistingTestCoverage', () => {
     const covered = detectExistingTestCoverage(files, endpoints, ['tests']);
     expect(covered).toEqual(['GET::/users/:id']);
   });
+
+  it('marks endpoints as covered when test path is built dynamically', () => {
+    const endpoints: ApiEndpoint[] = [
+      {
+        id: 'GET::/users/:id',
+        method: 'GET',
+        path: '/users/:id',
+        source: 'express',
+        pathParams: [{ name: 'id', required: true, type: 'string' }],
+        queryParams: [],
+        responses: [{ status: '200' }],
+        auth: 'none'
+      }
+    ];
+
+    const files = [
+      {
+        path: 'tests/users/getUser.spec.ts',
+        content: "it('works', async () => { await request(app).get('/users/' + userId); });"
+      }
+    ];
+
+    const covered = detectExistingTestCoverage(files, endpoints, ['tests']);
+    expect(covered).toEqual(['GET::/users/:id']);
+  });
 });
