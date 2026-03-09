@@ -4,17 +4,11 @@ node_modules/
 # Build outputs
 dist/
 coverage/
-*.tsbuildinfo
 
 # Extension packages
 *.zip
 apitiser-chrome-webstore.zip
 
-# Generated JS/DTs from TS config files
-vite.config.js
-vite.config.d.ts
-vitest.config.js
-vitest.config.d.ts
 
 # Environment and local overrides
 .env
