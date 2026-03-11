@@ -53,11 +53,22 @@ describe('generation progress integration', () => {
     const progressed = applyGenerationProgressToJob(job, {
       completedBatches: 1,
       totalBatches: 2,
-      generatedTests: tests
+      generatedTests: tests,
+      batchDiagnostics: {
+        batchIndex: 0,
+        endpointIds: ['GET::/users'],
+        provider: 'openai',
+        repairAttempted: false,
+        assessment: {
+          passed: true,
+          issues: []
+        }
+      }
     });
 
     expect(progressed.completedBatches).toBe(1);
     expect(progressed.progress).toBe(50);
+    expect(progressed.qualityStatus).toBe('pending');
 
     const coverage = buildCoverage(job.endpoints as ApiEndpoint[], tests);
     expect(coverage.coveragePercent).toBe(50);

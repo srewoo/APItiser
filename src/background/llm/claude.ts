@@ -1,5 +1,5 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
-import { buildPrompt, parseProviderOutput } from './promptBuilder';
+import { buildProviderPrompt, buildProviderSystemPrompt, parseProviderOutput } from './promptBuilder';
 import { withRetry } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
@@ -18,7 +18,13 @@ export class ClaudeAdapter implements LLMProviderAdapter {
     context: GenerateContext,
     options: ProviderOptions
   ): Promise<ProviderResult> {
-    const prompt = buildPrompt(batch, context);
+    const mode = options.promptMode ?? 'generate';
+    const prompt = options.promptOverride ?? buildProviderPrompt(this.provider, batch, context, {
+      mode,
+      currentTests: options.currentTests,
+      issues: options.repairIssues
+    });
+    const systemPrompt = buildProviderSystemPrompt(this.provider, mode);
 
     const text = await withRetry(
       async () => {
@@ -34,11 +40,17 @@ export class ClaudeAdapter implements LLMProviderAdapter {
             body: JSON.stringify({
               model: options.model,
               max_tokens: 6000,
-              messages: [{ role: 'user', content: `${prompt}\nReturn strict JSON array.` }]
+              system: systemPrompt,
+              messages: [{ role: 'user', content: prompt }]
             })
           },
-          options.timeoutMs,
-          options.signal
+          {
+            timeoutMs: options.timeoutMs,
+            hardTimeoutMs: options.hardTimeoutMs,
+            heartbeatMs: options.heartbeatMs,
+            onHeartbeat: options.onHeartbeat,
+            parentSignal: options.signal
+          }
         );
 
         if (!response.ok) {

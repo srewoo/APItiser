@@ -6,6 +6,12 @@ export type TestFramework = 'jest' | 'pytest' | 'mocha';
 
 export type TestCategory = 'positive' | 'negative' | 'edge' | 'security';
 
+export type PromptMode = 'generate' | 'repair';
+
+export type QualitySeverity = 'warn' | 'error';
+
+export type JobQualityStatus = 'pending' | 'passed' | 'failed';
+
 export type JobStage =
   | 'idle'
   | 'scanning'
@@ -153,6 +159,34 @@ export interface JobTimings {
   generationCompletedAt?: number;
 }
 
+export interface QualityIssue {
+  code:
+    | 'missing-endpoint-tests'
+    | 'missing-category'
+    | 'unresolved-path'
+    | 'invalid-status'
+    | 'generic-title'
+    | 'weak-security'
+    | 'provider-output';
+  message: string;
+  severity: QualitySeverity;
+  endpointId?: string;
+  category?: TestCategory;
+}
+
+export interface BatchQualityAssessment {
+  passed: boolean;
+  issues: QualityIssue[];
+}
+
+export interface BatchGenerationDiagnostics {
+  batchIndex: number;
+  endpointIds: string[];
+  provider: LLMProvider;
+  repairAttempted: boolean;
+  assessment: BatchQualityAssessment;
+}
+
 export interface RunMetric {
   jobId: string;
   status: 'complete' | 'error' | 'cancelled';
@@ -188,6 +222,9 @@ export interface JobState {
   resumedFromCheckpoint?: boolean;
   timings?: JobTimings;
   coverage?: CoverageSummary;
+  batchDiagnostics?: BatchGenerationDiagnostics[];
+  qualityStatus?: JobQualityStatus;
+  repairAttempts?: number;
   artifactId?: string;
   error?: string;
   activeProvider?: LLMProvider;
@@ -234,6 +271,13 @@ export interface ProviderOptions {
   model: string;
   signal?: AbortSignal;
   timeoutMs: number;
+  hardTimeoutMs?: number;
+  heartbeatMs?: number;
+  onHeartbeat?: (elapsedMs: number) => void | Promise<void>;
+  promptMode?: PromptMode;
+  repairIssues?: QualityIssue[];
+  currentTests?: GeneratedTestCase[];
+  promptOverride?: string;
 }
 
 export interface TestFrameworkAdapter {

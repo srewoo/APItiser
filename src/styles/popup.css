@@ -370,6 +370,47 @@ textarea:focus {
   transition: width 220ms ease;
 }
 
+.quality-box {
+  margin-top: 10px;
+  border-radius: 10px;
+  padding: 9px;
+  border: 1px solid rgba(41, 36, 28, 0.18);
+  background: var(--surface-strong);
+}
+
+.quality-box.quality-pending {
+  border-color: rgba(117, 92, 43, 0.36);
+  background: #f9f3e6;
+}
+
+.quality-box.quality-passed {
+  border-color: rgba(24, 112, 53, 0.36);
+  background: rgba(24, 112, 53, 0.07);
+}
+
+.quality-box.quality-failed {
+  border-color: rgba(162, 28, 47, 0.35);
+  background: rgba(162, 28, 47, 0.08);
+}
+
+.quality-summary,
+.quality-issue {
+  margin: 0;
+  font-size: 12px;
+}
+
+.quality-issue + .quality-issue {
+  margin-top: 6px;
+}
+
+.quality-issue.error {
+  color: var(--danger);
+}
+
+.quality-issue.warn {
+  color: #6c4a00;
+}
+
 .endpoint-list {
   display: grid;
   gap: 6px;

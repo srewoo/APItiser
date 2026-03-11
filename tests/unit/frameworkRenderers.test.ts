@@ -38,6 +38,7 @@ describe('framework adapters', () => {
 
     expect(files[0].path).toContain('.test.js');
     expect(files[0].content).toContain('returns users');
+    expect(files[0].content).toContain("require('undici')");
   });
 
   it('renders pytest files', () => {
@@ -54,5 +55,6 @@ describe('framework adapters', () => {
 
     expect(files[0].path).toContain('.spec.js');
     expect(files[0].content).toContain("const { expect } = require('chai');");
+    expect(files[0].content).toContain("require('undici')");
   });
 });

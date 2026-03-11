@@ -458,6 +458,11 @@ export function App() {
   };
 
   const busy = ['scanning', 'parsing', 'generating', 'packaging'].includes(activeOrLatestJob?.stage ?? 'idle');
+  const batchDiagnostics = activeOrLatestJob?.batchDiagnostics ?? [];
+  const latestBatchDiagnostic = batchDiagnostics[batchDiagnostics.length - 1];
+  const qualityIssues = batchDiagnostics.flatMap((diagnostic) => diagnostic.assessment.issues);
+  const visibleQualityIssues = qualityIssues.slice(0, 4);
+  const qualityStatusLabel = activeOrLatestJob?.qualityStatus ?? (batchDiagnostics.length ? 'pending' : undefined);
 
   return (
     <main className="shell">
@@ -739,6 +744,22 @@ export function App() {
         <p className="subtle">{activeOrLatestJob?.statusText ?? 'No active job'}</p>
         {activeOrLatestJob?.resumedFromCheckpoint ? (
           <p className="subtle">Recovered from checkpoint after worker restart.</p>
+        ) : null}
+        {qualityStatusLabel ? (
+          <div className={`quality-box quality-${qualityStatusLabel}`}>
+            <p className="quality-summary">
+              <strong>Quality gate:</strong> {qualityStatusLabel}
+              {activeOrLatestJob?.repairAttempts ? ` • repair passes ${activeOrLatestJob.repairAttempts}` : ''}
+            </p>
+            {latestBatchDiagnostic?.repairAttempted ? (
+              <p className="subtle">Latest batch required repair before acceptance.</p>
+            ) : null}
+            {visibleQualityIssues.map((issue) => (
+              <p key={`${issue.code}-${issue.message}`} className={`quality-issue ${issue.severity}`}>
+                {issue.message}
+              </p>
+            ))}
+          </div>
         ) : null}
       </section>
 

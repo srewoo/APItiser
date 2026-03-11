@@ -93,5 +93,22 @@ describe('parseCodeRoutes', () => {
     expect(endpoints.some((endpoint) => endpoint.source === 'flask' && endpoint.method === 'GET' && endpoint.path === '/orders')).toBe(true);
     expect(endpoints.some((endpoint) => endpoint.source === 'flask' && endpoint.method === 'POST' && endpoint.path === '/orders')).toBe(true);
   });
-});
 
+  it('detects chained express route declarations', () => {
+    const endpoints = parseCodeRoutes([
+      {
+        path: 'src/routes/users.ts',
+        content: `
+          import { Router } from 'express';
+          const router = Router();
+          router.route('/users/:id')
+            .get(getUser)
+            .patch(updateUser);
+        `
+      }
+    ]);
+
+    expect(endpoints.some((endpoint) => endpoint.source === 'express' && endpoint.method === 'GET' && endpoint.path === '/users/:id')).toBe(true);
+    expect(endpoints.some((endpoint) => endpoint.source === 'express' && endpoint.method === 'PATCH' && endpoint.path === '/users/:id')).toBe(true);
+  });
+});

@@ -9,7 +9,7 @@ import { scanRepositoryFiles } from './repo/scanner';
 import { validateRepoAccess } from './repo/validator';
 import { buildCoverage } from './generation/coverage';
 import { buildArtifactZip } from './generation/zipBuilder';
-import { applyGenerationProgressToJob, generateTestSuite, renderGeneratedFiles } from './generation/testGenerator';
+import { applyGenerationProgressToJob, BatchGenerationError, generateTestSuite, renderGeneratedFiles } from './generation/testGenerator';
 import { clearBadge, updateBadgeForJob } from './core/badge';
 import {
   clearContext,
@@ -165,6 +165,7 @@ const completeWithError = async (
     stage: 'error',
     statusText: message,
     error: message,
+    qualityStatus: 'failed',
     updatedAt: completedAt,
     timings: {
       ...job.timings,
@@ -246,6 +247,7 @@ const finalizeGeneration = async (
     statusText: `Completed with ${coverage.testsGenerated} tests`,
     coverage,
     generatedTests: tests,
+    qualityStatus: 'passed',
     artifactId: artifact.id,
     updatedAt: completedAt,
     timings: {
@@ -296,12 +298,39 @@ const executeGeneration = async (
           const currentJob = currentState.activeJob ?? job;
           const nextJob = applyGenerationProgressToJob(currentJob, progress);
           await checkpoint(nextJob, contextId);
+        },
+        onBatchHeartbeat: async (heartbeat) => {
+          if (contextId && isContextCleared(contextId)) {
+            return;
+          }
+          const elapsedSec = Math.round(heartbeat.elapsedMs / 1000);
+          const currentState = await loadState(contextId);
+          const currentJob = currentState.activeJob ?? job;
+          const beating: JobState = {
+            ...currentJob,
+            statusText: `Generating batch ${heartbeat.currentBatch + 1}/${heartbeat.totalBatches} — ${elapsedSec}s elapsed (${heartbeat.attempt})`,
+            updatedAt: Date.now()
+          };
+          emitProgress(await replaceActiveJob(beating, contextId), contextId);
         }
       });
+      const currentJob = (await loadState(contextId)).activeJob ?? job;
+      const existingDiagnostics = currentJob.batchDiagnostics ?? [];
+      const mergedDiagnostics = [...existingDiagnostics];
+
+      for (const diagnostic of generationResult.diagnostics) {
+        if (!mergedDiagnostics.some((item) => item.batchIndex === diagnostic.batchIndex)) {
+          mergedDiagnostics.push(diagnostic);
+        }
+      }
 
       return await finalizeGeneration(
         state,
-        (await loadState(contextId)).activeJob ?? job,
+        {
+          ...currentJob,
+          batchDiagnostics: mergedDiagnostics,
+          qualityStatus: 'passed'
+        },
         generationResult.tests,
         endpointsToGenerate.length,
         contextId
@@ -315,7 +344,16 @@ const executeGeneration = async (
       return await loadState(contextId);
     }
     const snapshot = (await loadState(contextId)).activeJob ?? job;
-    return await completeWithError(snapshot, error, state.settings.framework, contextId);
+    const qualitySnapshot = error instanceof BatchGenerationError
+      ? {
+          ...snapshot,
+          batchDiagnostics: [...(snapshot.batchDiagnostics ?? []), error.diagnostics],
+          qualityStatus: 'failed' as const,
+          repairAttempts: (snapshot.repairAttempts ?? 0) + (error.diagnostics.repairAttempted ? 1 : 0),
+          statusText: error.diagnostics.assessment.issues[0]?.message ?? snapshot.statusText
+        }
+      : snapshot;
+    return await completeWithError(qualitySnapshot, error, state.settings.framework, contextId);
   } finally {
     activeAbortController = null;
     generationInFlight = false;
@@ -501,9 +539,12 @@ const handleStartGeneration = async (
     completedBatches: 0,
     totalBatches: 0,
     generatedTests: [],
+    batchDiagnostics: [],
     eligibleEndpointCount: endpointsToGenerate.length,
     queuedEndpointIds: endpointsToGenerate.map((endpoint) => endpoint.id),
     activeProvider: state.settings.provider,
+    qualityStatus: 'pending',
+    repairAttempts: 0,
     resumedFromCheckpoint: false,
     updatedAt: Date.now(),
     timings: {

@@ -371,6 +371,59 @@ const routeFromObjectPattern = (
   }
 };
 
+const routeFromChainedRouteCall = (
+  expression: t.CallExpression,
+  file: RepoFile,
+  values: Map<string, string>,
+  ownerKinds: Map<string, ApiEndpoint['source']>,
+  imports: Map<string, ImportBinding>,
+  routes: RouteSignal[]
+) => {
+  if (!t.isMemberExpression(expression.callee)) {
+    return;
+  }
+
+  const chainedMethod = getPropName(expression.callee.property)?.toUpperCase();
+  if (!chainedMethod || !HTTP_METHODS.has(chainedMethod) || !t.isCallExpression(expression.callee.object)) {
+    return;
+  }
+
+  let routeBuilderCall: t.CallExpression = expression.callee.object;
+  while (t.isMemberExpression(routeBuilderCall.callee) && t.isCallExpression(routeBuilderCall.callee.object)) {
+    routeBuilderCall = routeBuilderCall.callee.object;
+  }
+
+  if (!t.isMemberExpression(routeBuilderCall.callee)) {
+    return;
+  }
+
+  const routeBuilderMethod = getPropName(routeBuilderCall.callee.property);
+  const ownerName = t.isIdentifier(routeBuilderCall.callee.object) ? routeBuilderCall.callee.object.name : undefined;
+  if (!ownerName || routeBuilderMethod !== 'route') {
+    return;
+  }
+
+  const source = inferSourceForOwner(ownerName, ownerKinds, imports);
+  if (source !== 'express') {
+    return;
+  }
+
+  const routePath = toStringValue(routeBuilderCall.arguments[0] as Expression | undefined, values);
+  if (!routePath) {
+    return;
+  }
+
+  routes.push({
+    method: chainedMethod,
+    path: normalizePath(routePath),
+    owner: ownerName,
+    source,
+    file,
+    confidence: 0.93,
+    evidence: [makeEvidence(file, `express chained route ${chainedMethod}`, expression.start ?? undefined)]
+  });
+};
+
 const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | null => {
   if (!JS_FILE_REGEX.test(file.path)) {
     return null;
@@ -584,6 +637,7 @@ const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | nu
     CallExpression(path) {
       const expression = path.node;
       routeFromObjectPattern(expression, file, values, ownerKinds, imports, routes);
+      routeFromChainedRouteCall(expression, file, values, ownerKinds, imports, routes);
 
       if (!t.isMemberExpression(expression.callee)) {
         return;
