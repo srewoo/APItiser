@@ -120,10 +120,24 @@ export function App() {
       }
     };
 
+    const handleTabActivated = () => {
+      void refreshFromCurrentTab();
+    };
+
+    const handleTabUpdated = (_id: number, info: chrome.tabs.TabChangeInfo) => {
+      if (info.status === 'complete') {
+        void refreshFromCurrentTab();
+      }
+    };
+
     chrome.runtime.onMessage.addListener(listener);
-    chrome.tabs.onActivated.addListener(() => void refreshFromCurrentTab());
-    chrome.tabs.onUpdated.addListener((_id, info) => { if (info.status === 'complete') void refreshFromCurrentTab(); });
-    return () => chrome.runtime.onMessage.removeListener(listener);
+    chrome.tabs.onActivated.addListener(handleTabActivated);
+    chrome.tabs.onUpdated.addListener(handleTabUpdated);
+    return () => {
+      chrome.runtime.onMessage.removeListener(listener);
+      chrome.tabs.onActivated.removeListener(handleTabActivated);
+      chrome.tabs.onUpdated.removeListener(handleTabUpdated);
+    };
   }, [appState?.settings.gitlabBaseUrl]);
 
   useEffect(() => {
@@ -165,11 +179,6 @@ export function App() {
       return filtered.length === current.length ? current : filtered;
     });
   }, [skipExistingEnabled, existingCoveredSet]);
-
-  // Apply dark mode to document
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', appState?.settings.darkMode ? 'dark' : 'light');
-  }, [appState?.settings.darkMode]);
 
   const patchSettings = async (patch: Partial<AppState['settings']>) => {
     setError('');
@@ -284,7 +293,11 @@ export function App() {
       contextId
     });
     if (response.type === 'JOB_ERROR') { setError(response.error); return; }
-    setNotice('Download started');
+    setNotice(
+      artifact.readiness === 'production_candidate'
+        ? 'Validated download started'
+        : `Download started${artifact.readiness ? ` (${artifact.readiness.replace(/_/g, ' ')})` : ''}`
+    );
   };
 
   const handleExportPostman = async () => {
@@ -295,8 +308,21 @@ export function App() {
 
   const handleExportSettings = () => {
     if (!appState) return;
-    const { openAiKey, claudeKey, geminiKey, githubToken, gitlabToken, ...safe } = appState.settings;
+    const {
+      openAiKey,
+      claudeKey,
+      geminiKey,
+      githubToken,
+      gitlabToken,
+      runtimeApiToken,
+      runtimeApiKey,
+      runtimeCsrfToken,
+      runtimeSessionCookie,
+      runtimeSetupSteps,
+      ...safe
+    } = appState.settings;
     void openAiKey; void claudeKey; void geminiKey; void githubToken; void gitlabToken;
+    void runtimeApiToken; void runtimeApiKey; void runtimeCsrfToken; void runtimeSessionCookie; void runtimeSetupSteps;
     const blob = new Blob([JSON.stringify(safe, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -323,16 +349,18 @@ export function App() {
     await chrome.tabs.create({ url });
   };
 
-  const busy = ['scanning', 'parsing', 'generating', 'packaging'].includes(activeOrLatestJob?.stage ?? 'idle');
+  const busy = ['scanning', 'parsing', 'generating', 'validating', 'packaging'].includes(activeOrLatestJob?.stage ?? 'idle');
   const batchDiagnostics = activeOrLatestJob?.batchDiagnostics ?? [];
   const latestBatchDiagnostic = batchDiagnostics[batchDiagnostics.length - 1];
   const qualityIssues = batchDiagnostics.flatMap((diagnostic) => diagnostic.assessment.issues);
   const visibleQualityIssues = qualityIssues.slice(0, 4);
   const qualityStatusLabel = activeOrLatestJob?.qualityStatus ?? (batchDiagnostics.length ? 'pending' : undefined);
   const generatedTests = activeOrLatestJob?.generatedTests ?? [];
+  const readiness = activeOrLatestJob?.readiness ?? appState?.artifacts?.[0]?.readiness;
+  const readinessNotes = activeOrLatestJob?.readinessNotes ?? appState?.artifacts?.[0]?.readinessNotes ?? [];
 
   return (
-    <main className="shell" data-theme={appState?.settings.darkMode ? 'dark' : 'light'}>
+    <main className="shell" data-theme="light">
       <header className="hero">
         <div>
           <p className="eyebrow">APItiser</p>
@@ -343,14 +371,6 @@ export function App() {
           <span className={`status-pill stage-${activeOrLatestJob?.stage ?? 'idle'}`}>
             {activeOrLatestJob?.statusText ?? notice}
           </span>
-          <button
-            type="button"
-            className="ghost theme-toggle"
-            aria-label="Toggle dark mode"
-            onClick={() => void patchSettings({ darkMode: !appState?.settings.darkMode })}
-          >
-            {appState?.settings.darkMode ? '☀️' : '🌙'}
-          </button>
           <button type="button" className="ghost settings-trigger" onClick={() => setSettingsOpen(true)}>
             Settings
           </button>
@@ -447,6 +467,8 @@ export function App() {
         onClear={() => void handleClear()}
         onExportPostman={() => void handleExportPostman()}
         jobStage={activeOrLatestJob?.stage}
+        readiness={readiness}
+        readinessNotes={readinessNotes}
       />
     </main>
   );

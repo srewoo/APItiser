@@ -161,6 +161,28 @@ describe('fetchGitLabRepoFiles', () => {
     expect(anyHeaderHasToken).toBe(true);
   });
 
+  it('queries the selected branch when listing the tree and fetching files', async () => {
+    const branchRepo: RepoRef = { ...repo, branch: 'feature/login-hardening' };
+    const requestedUrls: string[] = [];
+    const fetchMock = makeFetch((url) => {
+      requestedUrls.push(url);
+      if (url.includes('/repository/tree')) {
+        return treeResponse([{ id: 'sha1', path: 'src/routes/users.ts', type: 'blob' }]);
+      }
+      if (url.includes('/repository/files/')) {
+        return fileResponse('// route');
+      }
+      return { ok: false, status: 404 };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchGitLabRepoFiles(branchRepo);
+
+    expect(requestedUrls.some((url) => url.includes('/repository/tree') && url.includes('ref=feature%2Flogin-hardening'))).toBe(true);
+    expect(requestedUrls.some((url) => url.includes('/repository/files/') && url.includes('ref=feature%2Flogin-hardening'))).toBe(true);
+  });
+
   it('returns an empty list when the tree API fails', async () => {
     const fetchMock = makeFetch(() => ({ ok: false, status: 503 }));
     vi.stubGlobal('fetch', fetchMock);

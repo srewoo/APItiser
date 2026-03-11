@@ -105,6 +105,11 @@ export function EndpointList({
                         {Math.round(endpoint.confidence * 100)}% conf
                       </em>
                     ) : null}
+                    {endpoint.trustLabel ? (
+                      <em className="endpoint-tag" title={`Trust score ${endpoint.trustScore ?? 0}`}>
+                        {endpoint.trustLabel}
+                      </em>
+                    ) : null}
                     {existingCoveredSet.has(endpoint.id) ? <em className="endpoint-tag">existing test</em> : null}
                   </div>
                 </label>

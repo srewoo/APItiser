@@ -115,14 +115,25 @@ const buildEndpointInput = (endpoint: ApiEndpoint) => {
     path: endpoint.path,
     source: endpoint.source,
     auth: endpoint.auth,
+    authHints: endpoint.authHints,
     operationId: endpoint.operationId,
     summary: endpoint.summary,
     description: endpoint.description,
     confidence: endpoint.confidence,
+    trustScore: endpoint.trustScore,
+    trustLabel: endpoint.trustLabel,
+    sourceMetadata: endpoint.sourceMetadata,
+    observedExamples: endpoint.examples,
+    tags: endpoint.tags,
     pathParams: endpoint.pathParams,
     queryParams: endpoint.queryParams,
     body: summarizeBody(endpoint.body),
-    responses: endpoint.responses,
+    responses: endpoint.responses.map((response) => ({
+      status: response.status,
+      description: response.description,
+      contentType: response.contentType,
+      schema: summarizeBody(response.schema)
+    })),
     evidence: (endpoint.evidence ?? []).slice(0, 3).map((item) => ({
       filePath: item.filePath,
       line: item.line,
@@ -134,12 +145,23 @@ const buildEndpointInput = (endpoint: ApiEndpoint) => {
       requiredFields,
       optionalFields,
       likelyIdFields,
-      hasSecurityCases: endpoint.auth !== 'none' || endpoint.method !== 'GET'
+      hasSecurityCases: endpoint.auth !== 'none' || endpoint.method !== 'GET',
+      hasContractSchema: endpoint.responses.some((response) => Boolean(response.schema)),
+      likelyPaginated: /page|limit|offset|cursor/i.test(endpoint.path) || endpoint.queryParams.some((field) => /page|limit|offset|cursor/i.test(field.name)),
+      likelyIdempotent: ['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'].includes(endpoint.method)
     },
     examples: {
       concretePath: buildExamplePath(endpoint),
       query: buildExampleObject(endpoint.queryParams),
-      body: buildExampleBody(endpoint.body)
+      body: buildExampleBody(endpoint.body),
+      authHeaders: Object.fromEntries(
+        (endpoint.authHints ?? [])
+          .filter((hint) => hint.headerName)
+          .map((hint) => [
+            hint.headerName!,
+            hint.type === 'apiKey' ? '{{API_KEY}}' : hint.type === 'csrf' ? '{{CSRF_TOKEN}}' : 'Bearer {{API_TOKEN}}'
+          ])
+      )
     }
   };
 };
@@ -169,7 +191,13 @@ const baseConstraints = (context: GenerateContext) => ({
         },
         expected: {
           status: 'number',
-          contains: 'string[]'
+          contains: 'string[]',
+          contentType: 'string',
+          responseHeaders: 'record<string,string>',
+          jsonSchema: 'schema-object',
+          contractChecks: 'string[]',
+          pagination: 'boolean',
+          idempotent: 'boolean'
         }
       }
     ]
@@ -211,10 +239,14 @@ export const buildPrompt = (batch: ApiEndpoint[], context: GenerateContext): str
     'Use the exact HTTP method for each endpoint.',
     'For request.path, produce a concrete callable path with realistic sample values for path params. Do not leave :id or {id} placeholders.',
     'Prefer documented success codes from endpoint responses when available.',
-    'If auth is bearer, include an Authorization header placeholder.',
+    'Honor authHints exactly when present. Use Authorization, API key, cookie, or CSRF placeholders only when the endpoint metadata supports them.',
     'Negative tests should use realistic invalid inputs or missing required fields.',
     'Edge tests should stress boundaries, optional inputs, empty states, pagination limits, or uncommon but valid combinations.',
     'Security tests should focus on auth absence, auth misuse, IDOR-style access, privilege boundaries, over-posting, and input abuse that is relevant to the endpoint.',
+    'For positive tests, add jsonSchema when a response schema is available and include contentType when known.',
+    'Mark pagination=true when validating list endpoints with page/limit/cursor semantics.',
+    'Mark idempotent=true for GET/PUT/DELETE/HEAD/OPTIONS tests that should be safely repeatable.',
+    'Add contractChecks that describe key response invariants such as required fields, array/object shape, or auth boundary expectations.',
     'Do not output duplicate tests.',
     'Make titles specific and endpoint-aware.',
     ...(context.customPromptInstructions ? [`Custom Instructions: ${context.customPromptInstructions}`] : []),

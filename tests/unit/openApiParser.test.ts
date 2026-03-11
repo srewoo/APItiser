@@ -59,4 +59,56 @@ describe('parseOpenApiSpecs', () => {
     expect(endpoints[0].method).toBe('POST');
     expect(endpoints[0].path).toBe('/catalog/items');
   });
+
+  it('merges path-level parameters and resolves inherited or overridden security', () => {
+    const endpoints = parseOpenApiSpecs([
+      {
+        path: 'specs/authenticated-api.yaml',
+        content: `
+openapi: 3.0.3
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+paths:
+  /users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: includeMeta
+        in: query
+        required: false
+        schema:
+          type: boolean
+    get:
+      security: []
+      responses:
+        "200":
+          description: ok
+    post:
+      responses:
+        "201":
+          description: created
+`
+      }
+    ]);
+
+    expect(endpoints).toHaveLength(2);
+
+    const getEndpoint = endpoints.find((endpoint) => endpoint.method === 'GET');
+    const postEndpoint = endpoints.find((endpoint) => endpoint.method === 'POST');
+
+    expect(getEndpoint?.auth).toBe('none');
+    expect(getEndpoint?.pathParams[0]?.name).toBe('id');
+    expect(getEndpoint?.queryParams[0]?.name).toBe('includeMeta');
+    expect(postEndpoint?.auth).toBe('bearer');
+    expect(postEndpoint?.pathParams[0]?.name).toBe('id');
+    expect(postEndpoint?.queryParams[0]?.name).toBe('includeMeta');
+  });
 });

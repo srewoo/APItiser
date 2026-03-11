@@ -12,11 +12,33 @@ export type QualitySeverity = 'warn' | 'error';
 
 export type JobQualityStatus = 'pending' | 'passed' | 'failed';
 
+export type ReadinessState = 'scaffold' | 'review_required' | 'validated' | 'production_candidate';
+
+export type EndpointSource =
+  | 'express'
+  | 'fastify'
+  | 'nestjs'
+  | 'openapi'
+  | 'koa'
+  | 'hono'
+  | 'nextjs'
+  | 'fastapi'
+  | 'flask'
+  | 'spring'
+  | 'gin';
+
+export type AuthType = 'bearer' | 'apiKey' | 'cookieSession' | 'oauth2' | 'csrf' | 'none' | 'unknown';
+
+export type TrustLabel = 'high' | 'medium' | 'heuristic';
+
+export type RuntimeAuthMode = 'none' | 'bearer' | 'apiKey' | 'cookieSession' | 'oauth2';
+
 export type JobStage =
   | 'idle'
   | 'scanning'
   | 'parsing'
   | 'generating'
+  | 'validating'
   | 'packaging'
   | 'complete'
   | 'error'
@@ -42,18 +64,24 @@ export interface ApiEndpoint {
   id: string;
   method: string;
   path: string;
-  source: 'express' | 'fastify' | 'nestjs' | 'openapi' | 'koa' | 'hono' | 'nextjs' | 'fastapi' | 'flask';
+  source: EndpointSource;
   filePath?: string;
   operationId?: string;
   summary?: string;
   description?: string;
-  auth?: 'bearer' | 'apiKey' | 'none' | 'unknown';
+  auth?: AuthType;
   confidence?: number;
   evidence?: EndpointEvidence[];
   pathParams: SchemaField[];
   queryParams: SchemaField[];
   body?: SchemaObject;
   responses: EndpointResponse[];
+  authHints?: AuthHint[];
+  examples?: EndpointExample[];
+  sourceMetadata?: EndpointSourceMetadata;
+  trustScore?: number;
+  trustLabel?: TrustLabel;
+  tags?: string[];
 }
 
 export interface EndpointEvidence {
@@ -69,6 +97,7 @@ export interface SchemaField {
   type: string;
   format?: string;
   description?: string;
+  example?: unknown;
 }
 
 export interface SchemaObject {
@@ -77,11 +106,48 @@ export interface SchemaObject {
   properties?: Record<string, SchemaObject | SchemaField>;
   items?: SchemaObject;
   description?: string;
+  example?: unknown;
 }
 
 export interface EndpointResponse {
   status: string;
   description?: string;
+  contentType?: string;
+  schema?: SchemaObject;
+}
+
+export interface AuthHint {
+  type: AuthType;
+  headerName?: string;
+  queryParamName?: string;
+  cookieName?: string;
+  csrfHeaderName?: string;
+  setupSteps?: string[];
+  confidence?: number;
+  evidence?: string;
+}
+
+export interface EndpointExample {
+  origin: 'openapi' | 'code' | 'existing-test' | 'inferred';
+  request?: {
+    headers?: Record<string, string>;
+    query?: Record<string, unknown>;
+    body?: unknown;
+    cookies?: Record<string, string>;
+  };
+  response?: {
+    status?: number;
+    bodySnippet?: string;
+  };
+  note?: string;
+}
+
+export interface EndpointSourceMetadata {
+  sources: EndpointSource[];
+  hasExistingTests: boolean;
+  mergedFromOpenApi: boolean;
+  mergedFromCode: boolean;
+  inferredFromExamples: boolean;
 }
 
 export interface CoverageSummary {
@@ -107,6 +173,9 @@ export interface GeneratedTestCase {
   endpointId: string;
   category: TestCategory;
   title: string;
+  rationale?: string;
+  trustScore?: number;
+  trustLabel?: TrustLabel;
   request: {
     method: string;
     path: string;
@@ -117,6 +186,12 @@ export interface GeneratedTestCase {
   expected: {
     status: number;
     contains?: string[];
+    contentType?: string;
+    responseHeaders?: Record<string, string>;
+    jsonSchema?: SchemaObject;
+    contractChecks?: string[];
+    pagination?: boolean;
+    idempotent?: boolean;
   };
 }
 
@@ -132,6 +207,9 @@ export interface GeneratedArtifact {
   framework: TestFramework;
   files: GeneratedFile[];
   zipBase64: string;
+  readiness?: ReadinessState;
+  readinessNotes?: string[];
+  validationSummary?: ValidationSummary;
 }
 
 export interface ExtensionSettings {
@@ -156,8 +234,30 @@ export interface ExtensionSettings {
   customPromptInstructions?: string;
   /** Whether to auto-fallback to the next configured provider on error */
   enableProviderFallback?: boolean;
-  /** UI theme preference */
-  darkMode?: boolean;
+  /** Execute generated tests against baseUrl before packaging */
+  validateGeneratedTests?: boolean;
+  /** Attempt LLM repair for tests that fail live validation */
+  autoRepairFailingTests?: boolean;
+  /** Maximum validation repair rounds */
+  maxValidationRepairs?: number;
+  /** Optional session cookie name used during live validation */
+  sessionCookieName?: string;
+  /** Optional CSRF header name used during live validation */
+  csrfHeaderName?: string;
+  /** Optional API key header name used during live validation */
+  apiKeyHeaderName?: string;
+  /** Runtime bearer/OAuth token used for live validation */
+  runtimeApiToken?: string;
+  /** Runtime API key value used for live validation */
+  runtimeApiKey?: string;
+  /** Runtime CSRF token used for live validation */
+  runtimeCsrfToken?: string;
+  /** Runtime session cookie value used for live validation */
+  runtimeSessionCookie?: string;
+  /** Auth mode used when executing live validation flows */
+  runtimeAuthMode?: RuntimeAuthMode;
+  /** Optional explicit setup/login flow executed before live validation */
+  runtimeSetupSteps?: RuntimeSetupStep[];
 }
 
 export interface JobTimings {
@@ -175,7 +275,12 @@ export interface QualityIssue {
     | 'invalid-status'
     | 'generic-title'
     | 'weak-security'
-    | 'provider-output';
+    | 'provider-output'
+    | 'schema-assertion'
+    | 'contract-assertion'
+    | 'execution-status'
+    | 'execution-body'
+    | 'execution-auth';
   message: string;
   severity: QualitySeverity;
   endpointId?: string;
@@ -193,6 +298,61 @@ export interface BatchGenerationDiagnostics {
   provider: LLMProvider;
   repairAttempted: boolean;
   assessment: BatchQualityAssessment;
+}
+
+export interface ValidationFailure {
+  type: 'status' | 'contains' | 'schema' | 'header' | 'network' | 'contract' | 'auth' | 'pagination' | 'idempotency';
+  message: string;
+  expected?: string;
+  actual?: string;
+}
+
+export interface RuntimeSetupStep {
+  id: string;
+  name: string;
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  query?: Record<string, unknown>;
+  body?: unknown;
+  expectedStatus?: number;
+  extractJsonPaths?: Partial<Record<'apiToken' | 'apiKey' | 'csrfToken' | 'sessionCookie', string>>;
+  extractHeaders?: Partial<Record<'apiToken' | 'apiKey' | 'csrfToken' | 'sessionCookie', string>>;
+  extractCookieName?: string;
+}
+
+export interface ValidationSetupStepResult {
+  id: string;
+  name: string;
+  success: boolean;
+  durationMs: number;
+  status?: number;
+  extracted: string[];
+  message?: string;
+  responseSnippet?: string;
+}
+
+export interface ValidationResult {
+  endpointId: string;
+  title: string;
+  success: boolean;
+  durationMs: number;
+  status?: number;
+  failures: ValidationFailure[];
+  responseSnippet?: string;
+}
+
+export interface ValidationSummary {
+  attempted: number;
+  passed: number;
+  failed: number;
+  repaired: number;
+  skipped: number;
+  lastValidatedAt: number;
+  results: ValidationResult[];
+  warnings?: string[];
+  notRunReason?: string;
+  setupSteps?: ValidationSetupStepResult[];
 }
 
 export interface RunMetric {
@@ -236,6 +396,9 @@ export interface JobState {
   artifactId?: string;
   error?: string;
   activeProvider?: LLMProvider;
+  validationSummary?: ValidationSummary;
+  readiness?: ReadinessState;
+  readinessNotes?: string[];
 }
 
 export interface AppState {
@@ -264,6 +427,7 @@ export interface GenerateContext {
   includeCategories: TestCategory[];
   timeoutMs: number;
   customPromptInstructions?: string;
+  baseUrl?: string;
 }
 
 export interface LLMProviderAdapter {
@@ -301,4 +465,7 @@ export interface ProjectMeta {
   generatedAt: string;
   framework: TestFramework;
   endpointCount: number;
+  readiness?: ReadinessState;
+  readinessNotes?: string[];
+  validationSummary?: ValidationSummary;
 }

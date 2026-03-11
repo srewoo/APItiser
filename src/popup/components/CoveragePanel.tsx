@@ -27,11 +27,28 @@ export function CoveragePanel({ activeOrLatestJob }: CoveragePanelProps) {
           <p>Coverage</p>
           <strong>{activeOrLatestJob?.coverage?.coveragePercent ?? 0}%</strong>
         </article>
+        <article>
+          <p>Validated</p>
+          <strong>
+            {activeOrLatestJob?.validationSummary
+              ? `${activeOrLatestJob.validationSummary.passed}/${activeOrLatestJob.validationSummary.attempted}`
+              : '—'}
+          </strong>
+        </article>
       </div>
       <div className="gap-list">
         {(activeOrLatestJob?.coverage?.gaps ?? []).slice(0, 3).map((gap) => (
           <p key={gap}>{gap}</p>
         ))}
+        {activeOrLatestJob?.validationSummary?.failed ? (
+          <p>{activeOrLatestJob.validationSummary.failed} tests still failed live validation.</p>
+        ) : null}
+        {activeOrLatestJob?.validationSummary?.notRunReason ? (
+          <p>{activeOrLatestJob.validationSummary.notRunReason}</p>
+        ) : null}
+        {activeOrLatestJob?.readiness ? (
+          <p>Readiness: {activeOrLatestJob.readiness.replace(/_/g, ' ')}</p>
+        ) : null}
       </div>
     </section>
   );

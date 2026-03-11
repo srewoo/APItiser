@@ -111,4 +111,31 @@ describe('parseCodeRoutes', () => {
     expect(endpoints.some((endpoint) => endpoint.source === 'express' && endpoint.method === 'GET' && endpoint.path === '/users/:id')).toBe(true);
     expect(endpoints.some((endpoint) => endpoint.source === 'express' && endpoint.method === 'PATCH' && endpoint.path === '/users/:id')).toBe(true);
   });
+
+  it('detects spring and gin routes with prefixes', () => {
+    const endpoints = parseCodeRoutes([
+      {
+        path: 'src/main/java/demo/UserController.java',
+        content: `
+          @RestController
+          @RequestMapping("/api")
+          class UserController {
+            @GetMapping("/users/{id}")
+            public User getUser() { return null; }
+          }
+        `
+      },
+      {
+        path: 'server/routes.go',
+        content: `
+          router := gin.Default()
+          v1 := router.Group("/v1")
+          v1.POST("/orders", createOrder)
+        `
+      }
+    ]);
+
+    expect(endpoints.some((endpoint) => endpoint.source === 'spring' && endpoint.method === 'GET' && endpoint.path === '/api/users/:id')).toBe(true);
+    expect(endpoints.some((endpoint) => endpoint.source === 'gin' && endpoint.method === 'POST' && endpoint.path === '/v1/orders')).toBe(true);
+  });
 });

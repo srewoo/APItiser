@@ -1,6 +1,6 @@
 {
   "name": "apitiser-extension",
-  "version": "0.1.0",
+  "version": "1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,8 @@
     "build:webstore": "npm run build && rm -f apitiser-chrome-webstore.zip && (cd dist && zip -r ../apitiser-chrome-webstore.zip . -x '*.DS_Store' '*/.DS_Store')",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "benchmark": "vitest run tests/benchmarks/goldStandard.test.ts"
   },
   "dependencies": {
     "@babel/parser": "^7.29.0",

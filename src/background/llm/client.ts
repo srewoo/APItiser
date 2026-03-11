@@ -3,10 +3,23 @@ import { OpenAiAdapter } from './openai';
 import { ClaudeAdapter } from './claude';
 import { GeminiAdapter } from './gemini';
 
-const providers: Record<LLMProvider, LLMProviderAdapter> = {
-  openai: new OpenAiAdapter(),
-  claude: new ClaudeAdapter(),
-  gemini: new GeminiAdapter()
-};
+const loadedProviders = new Map<LLMProvider, LLMProviderAdapter>();
 
-export const getProviderAdapter = (provider: LLMProvider): LLMProviderAdapter => providers[provider];
+export const loadProviderAdapter = async (provider: LLMProvider): Promise<LLMProviderAdapter> => {
+  const cached = loadedProviders.get(provider);
+  if (cached) {
+    return cached;
+  }
+
+  let adapter: LLMProviderAdapter;
+  if (provider === 'openai') {
+    adapter = new OpenAiAdapter();
+  } else if (provider === 'claude') {
+    adapter = new ClaudeAdapter();
+  } else {
+    adapter = new GeminiAdapter();
+  }
+
+  loadedProviders.set(provider, adapter);
+  return adapter;
+};

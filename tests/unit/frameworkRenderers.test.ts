@@ -17,6 +17,21 @@ const tests: GeneratedTestCase[] = [
       status: 200,
       contains: ['users']
     }
+  },
+  {
+    endpointId: 'GET::/private',
+    category: 'security',
+    title: 'rejects missing auth',
+    request: {
+      method: 'GET',
+      path: '/private',
+      headers: {
+        Authorization: 'Bearer {{API_TOKEN}}'
+      }
+    },
+    expected: {
+      status: 401
+    }
   }
 ];
 
@@ -36,25 +51,32 @@ describe('framework adapters', () => {
     const adapter = new JestFrameworkAdapter();
     const files = adapter.render(tests, projectMeta);
 
+    const content = files.map((file) => file.content).join('\n');
+
     expect(files[0].path).toContain('.test.js');
-    expect(files[0].content).toContain('returns users');
-    expect(files[0].content).toContain("require('undici')");
+    expect(content).toContain('returns users');
+    expect(content).toContain("require('undici')");
+    expect(content).toContain('process.env.API_TOKEN');
   });
 
   it('renders pytest files', () => {
     const adapter = new PytestFrameworkAdapter();
     const files = adapter.render(tests, { ...projectMeta, framework: 'pytest' });
+    const content = files.map((file) => file.content).join('\n');
 
     expect(files[0].path).toContain('.py');
-    expect(files[0].content).toContain('assert response.status_code == 200');
+    expect(content).toContain('assert response.status_code == 200');
+    expect(content).toContain("os.getenv('API_TOKEN', 'replace-me')");
   });
 
   it('renders mocha files', () => {
     const adapter = new MochaFrameworkAdapter();
     const files = adapter.render(tests, { ...projectMeta, framework: 'mocha' });
+    const content = files.map((file) => file.content).join('\n');
 
     expect(files[0].path).toContain('.spec.js');
-    expect(files[0].content).toContain("const { expect } = require('chai');");
-    expect(files[0].content).toContain("require('undici')");
+    expect(content).toContain("const { expect } = require('chai');");
+    expect(content).toContain("require('undici')");
+    expect(content).toContain('process.env.API_TOKEN');
   });
 });

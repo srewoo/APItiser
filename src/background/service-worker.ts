@@ -2,15 +2,6 @@
 
 import type { AppState, JobState, RepoRef, RunMetric } from '@shared/types';
 import type { CommandMessage, EventMessage } from '@shared/messages';
-import { parseApiMap } from './parser/apiParser';
-import { applyOpenApiFallback } from './parser/scanInput';
-import { detectExistingTestCoverage } from './parser/testCoverageDetector';
-import { scanRepositoryFiles } from './repo/scanner';
-import { validateRepoAccess } from './repo/validator';
-import { buildCoverage } from './generation/coverage';
-import { buildArtifactZip } from './generation/zipBuilder';
-import { buildPostmanCollection } from './generation/postmanExport';
-import { applyGenerationProgressToJob, BatchGenerationError, generateTestSuite, renderGeneratedFiles } from './generation/testGenerator';
 import { clearBadge, updateBadgeForJob } from './core/badge';
 import {
   clearContext,
@@ -28,11 +19,29 @@ import { emitComplete, emitError, emitProgress, emitStateSnapshot } from './core
 import { notify } from './core/notifier';
 import { registerKeepAliveListener, startKeepAlive, stopKeepAlive } from './core/keepAlive';
 import { createId } from './utils/id';
+import { parseApiMap } from './parser/apiParser';
+import { applyOpenApiFallback } from './parser/scanInput';
+import { detectExistingTestCoverage } from './parser/testCoverageDetector';
+import { scanRepositoryFiles } from './repo/scanner';
+import { validateRepoAccess } from './repo/validator';
+import { buildCoverage } from './generation/coverage';
+import { buildArtifactZip } from './generation/zipBuilder';
+import { assessReadiness } from './generation/readiness';
+import { buildPostmanCollection } from './generation/postmanExport';
+import { validateGeneratedTestsAgainstBaseUrl } from './generation/executionValidator';
+import {
+  applyGenerationProgressToJob,
+  generateTestSuite,
+  renderGeneratedFiles,
+  repairTestsFromValidation
+} from './generation/testGenerator';
 
-let activeAbortController: AbortController | null = null;
-let scanAbortController: AbortController | null = null;
-let generationInFlight = false;
-let scanInFlight = false;
+const generationAbortControllers = new Map<string, AbortController>();
+const scanAbortControllers = new Map<string, AbortController>();
+const generationInFlightContexts = new Set<string>();
+const scanInFlightContexts = new Set<string>();
+const cancelledContexts = new Set<string>();
+const keepAliveHolds = new Set<string>();
 let autoResumeStarted = false;
 const clearedContexts = new Set<string>();
 const sidePanelPath = 'sidepanel.html';
@@ -40,6 +49,70 @@ const sidePanelPath = 'sidepanel.html';
 const hasSidePanelApi = (): boolean => typeof chrome.sidePanel !== 'undefined';
 const resolveContextId = (contextId?: string): string => contextId?.trim() || 'global';
 const isContextCleared = (contextId: string): boolean => clearedContexts.has(contextId);
+const isContextCancelled = (contextId: string): boolean => cancelledContexts.has(contextId);
+const generationHoldKey = (contextId: string): string => `generation:${contextId}`;
+const scanHoldKey = (contextId: string): string => `scan:${contextId}`;
+
+const acquireKeepAlive = async (holdKey: string): Promise<void> => {
+  if (keepAliveHolds.has(holdKey)) {
+    return;
+  }
+
+  const shouldStart = keepAliveHolds.size === 0;
+  keepAliveHolds.add(holdKey);
+
+  if (shouldStart) {
+    await startKeepAlive();
+  }
+};
+
+const releaseKeepAlive = async (holdKey: string): Promise<void> => {
+  if (!keepAliveHolds.delete(holdKey)) {
+    return;
+  }
+
+  if (keepAliveHolds.size === 0) {
+    await stopKeepAlive();
+  }
+};
+
+const beginGenerationExecution = async (contextId: string): Promise<AbortController> => {
+  if (generationInFlightContexts.has(contextId)) {
+    throw new Error('Generation is already in progress.');
+  }
+
+  const controller = new AbortController();
+  generationInFlightContexts.add(contextId);
+  generationAbortControllers.set(contextId, controller);
+  await acquireKeepAlive(generationHoldKey(contextId));
+  return controller;
+};
+
+const finishGenerationExecution = async (contextId: string): Promise<void> => {
+  generationAbortControllers.delete(contextId);
+  if (generationInFlightContexts.delete(contextId)) {
+    await releaseKeepAlive(generationHoldKey(contextId));
+  }
+};
+
+const beginScanExecution = async (contextId: string): Promise<AbortController> => {
+  if (scanInFlightContexts.has(contextId)) {
+    throw new Error('Scan is already in progress.');
+  }
+
+  const controller = new AbortController();
+  scanInFlightContexts.add(contextId);
+  scanAbortControllers.set(contextId, controller);
+  await acquireKeepAlive(scanHoldKey(contextId));
+  return controller;
+};
+
+const finishScanExecution = async (contextId: string): Promise<void> => {
+  scanAbortControllers.delete(contextId);
+  if (scanInFlightContexts.delete(contextId)) {
+    await releaseKeepAlive(scanHoldKey(contextId));
+  }
+};
 
 const configureSidePanelDefaults = async (): Promise<void> => {
   if (!hasSidePanelApi()) {
@@ -103,6 +176,14 @@ const checkpoint = async (job: JobState, contextId?: string): Promise<AppState> 
 
 const repoLabel = (repo?: RepoRef): string | undefined =>
   repo ? `${repo.platform}:${repo.owner}/${repo.repo}` : undefined;
+
+const isBatchGenerationFailure = (
+  error: unknown
+): error is { diagnostics: NonNullable<JobState['batchDiagnostics']>[number]; partialTests: JobState['generatedTests'] } =>
+  error !== null
+  && typeof error === 'object'
+  && 'diagnostics' in error
+  && 'partialTests' in error;
 
 const buildMetric = (
   job: JobState,
@@ -175,7 +256,6 @@ const completeWithError = async (
     }
   };
 
-  await stopKeepAlive();
   const metric = buildMetric(failed, 'error', completedAt, framework);
   const state = await completeJob(failed, undefined, metric, contextId);
   updateBadgeForJob(failed);
@@ -201,7 +281,6 @@ const completeWithCancel = async (
     }
   };
 
-  await stopKeepAlive();
   const metric = buildMetric(cancelled, 'cancelled', completedAt, framework);
   const state = await completeJob(cancelled, undefined, metric, contextId);
   updateBadgeForJob(cancelled);
@@ -214,10 +293,10 @@ const finalizeGeneration = async (
   job: JobState,
   tests: JobState['generatedTests'],
   endpointCount: number,
+  validationSummary?: JobState['validationSummary'],
   contextId?: string
 ): Promise<AppState> => {
   if (contextId && isContextCleared(contextId)) {
-    await stopKeepAlive();
     return await loadState(contextId);
   }
 
@@ -231,8 +310,17 @@ const finalizeGeneration = async (
 
   await checkpoint(packaging, contextId);
 
-  const files = renderGeneratedFiles(state.settings, packaging.repo!, endpointCount, tests);
-  const artifact = await buildArtifactZip(state.settings.framework, files);
+  const readinessAssessment = assessReadiness(tests, validationSummary);
+  const files = renderGeneratedFiles(state.settings, packaging.repo!, endpointCount, tests, {
+    readiness: readinessAssessment.readiness,
+    readinessNotes: readinessAssessment.notes,
+    validationSummary
+  });
+  const artifact = await buildArtifactZip(state.settings.framework, files, {
+    readiness: readinessAssessment.readiness,
+    readinessNotes: readinessAssessment.notes,
+    validationSummary
+  });
   const completedAt = Date.now();
 
   const coverage = buildCoverage(
@@ -246,10 +334,13 @@ const finalizeGeneration = async (
     ...packaging,
     stage: 'complete',
     progress: 100,
-    statusText: `Completed with ${coverage.testsGenerated} tests`,
+    statusText: `Completed with ${coverage.testsGenerated} tests • ${readinessAssessment.readiness.replace(/_/g, ' ')}`,
     coverage,
     generatedTests: tests,
-    qualityStatus: 'passed',
+    qualityStatus: validationSummary?.failed || validationSummary?.notRunReason ? 'failed' : 'passed',
+    validationSummary,
+    readiness: readinessAssessment.readiness,
+    readinessNotes: readinessAssessment.notes,
     artifactId: artifact.id,
     updatedAt: completedAt,
     timings: {
@@ -258,11 +349,15 @@ const finalizeGeneration = async (
     }
   };
 
-  await stopKeepAlive();
   const metric = buildMetric(complete, 'complete', completedAt, state.settings.framework);
   const finalState = await completeJob(complete, artifact, metric, contextId);
   updateBadgeForJob(complete);
-  notify('APItiser ready', 'Generated tests are ready to download.');
+  notify(
+    'APItiser ready',
+    readinessAssessment.readiness === 'production_candidate'
+      ? 'Generated tests validated as a production candidate.'
+      : 'Generated tests are ready to download with readiness guidance.'
+  );
   emitComplete(finalState, contextId);
   return finalState;
 };
@@ -275,15 +370,15 @@ const executeGeneration = async (
   initialTests: JobState['generatedTests'] = [],
   contextId?: string
 ): Promise<AppState> => {
-  generationInFlight = true;
-  if (contextId) {
-    clearedContexts.delete(contextId);
-  }
-  activeAbortController = new AbortController();
-
-  await startKeepAlive();
+  const contextKey = resolveContextId(contextId);
+  cancelledContexts.delete(contextKey);
+  clearedContexts.delete(contextKey);
+  const activeAbortController = await beginGenerationExecution(contextKey);
 
   try {
+    let finalTests = initialTests;
+    let finalJob = job;
+
     if (endpointsToGenerate.length > 0 && startBatch < Math.ceil(endpointsToGenerate.length / state.settings.batchSize)) {
       const generationResult = await generateTestSuite({
         settings: state.settings,
@@ -293,30 +388,33 @@ const executeGeneration = async (
         initialTests,
         signal: activeAbortController.signal,
         onBatchComplete: async (progress) => {
-          if (contextId && isContextCleared(contextId)) {
+          if (isContextCleared(contextKey)) {
             throw new Error('Context cleared');
           }
-          const currentState = await loadState(contextId);
+          if (isContextCancelled(contextKey)) {
+            throw new Error('Context cancelled');
+          }
+          const currentState = await loadState(contextKey);
           const currentJob = currentState.activeJob ?? job;
           const nextJob = applyGenerationProgressToJob(currentJob, progress);
-          await checkpoint(nextJob, contextId);
+          await checkpoint(nextJob, contextKey);
         },
         onBatchHeartbeat: async (heartbeat) => {
-          if (contextId && isContextCleared(contextId)) {
+          if (isContextCleared(contextKey) || isContextCancelled(contextKey)) {
             return;
           }
           const elapsedSec = Math.round(heartbeat.elapsedMs / 1000);
-          const currentState = await loadState(contextId);
+          const currentState = await loadState(contextKey);
           const currentJob = currentState.activeJob ?? job;
           const beating: JobState = {
             ...currentJob,
             statusText: `Generating batch ${heartbeat.currentBatch + 1}/${heartbeat.totalBatches} — ${elapsedSec}s elapsed (${heartbeat.attempt})`,
             updatedAt: Date.now()
           };
-          emitProgress(await replaceActiveJob(beating, contextId), contextId);
+          emitProgress(await replaceActiveJob(beating, contextKey), contextKey);
         }
       });
-      const currentJob = (await loadState(contextId)).activeJob ?? job;
+      const currentJob = (await loadState(contextKey)).activeJob ?? job;
       const existingDiagnostics = currentJob.batchDiagnostics ?? [];
       const mergedDiagnostics = [...existingDiagnostics];
 
@@ -326,27 +424,87 @@ const executeGeneration = async (
         }
       }
 
-      return await finalizeGeneration(
-        state,
-        {
-          ...currentJob,
-          batchDiagnostics: mergedDiagnostics,
-          qualityStatus: 'passed'
-        },
-        generationResult.tests,
-        endpointsToGenerate.length,
-        contextId
-      );
+      finalTests = generationResult.tests;
+      finalJob = {
+        ...currentJob,
+        batchDiagnostics: mergedDiagnostics,
+        qualityStatus: 'passed'
+      };
     }
 
-    return await finalizeGeneration(state, job, initialTests, endpointsToGenerate.length, contextId);
-  } catch (error) {
-    if (contextId && isContextCleared(contextId)) {
-      await stopKeepAlive();
-      return await loadState(contextId);
+    if (!state.settings.validateGeneratedTests || !state.settings.baseUrl || finalTests.length === 0) {
+      return await finalizeGeneration(state, finalJob, finalTests, endpointsToGenerate.length, undefined, contextKey);
     }
-    const snapshot = (await loadState(contextId)).activeJob ?? job;
-    const qualitySnapshot = error instanceof BatchGenerationError
+
+    let validatedTests = finalTests;
+    let validationSummary = await validateGeneratedTestsAgainstBaseUrl(
+      state.settings,
+      validatedTests,
+      finalJob.endpoints,
+      activeAbortController.signal
+    );
+
+    for (let round = 0; round < (state.settings.maxValidationRepairs ?? 0); round += 1) {
+      if (!state.settings.autoRepairFailingTests || validationSummary.failed === 0) {
+        break;
+      }
+
+      const validatingJob: JobState = {
+        ...finalJob,
+        stage: 'validating',
+        progress: 88 + Math.min(round * 3, 6),
+        statusText: `Validating generated tests against ${state.settings.baseUrl} (${validationSummary.failed} failing)`,
+        generatedTests: validatedTests,
+        validationSummary,
+        updatedAt: Date.now()
+      };
+      await checkpoint(validatingJob, contextKey);
+
+      validatedTests = await repairTestsFromValidation({
+        settings: state.settings,
+        repo: finalJob.repo!,
+        endpoints: finalJob.endpoints,
+        tests: validatedTests,
+        validationSummary,
+        signal: activeAbortController.signal
+      });
+
+      validationSummary = await validateGeneratedTestsAgainstBaseUrl(
+        state.settings,
+        validatedTests,
+        finalJob.endpoints,
+        activeAbortController.signal
+      );
+      validationSummary = {
+        ...validationSummary,
+        repaired: round + 1
+      };
+    }
+
+    const validatedJob: JobState = {
+      ...finalJob,
+      stage: 'validating',
+      progress: 92,
+      statusText: validationSummary.failed
+        ? `Validation finished with ${validationSummary.failed} failing tests`
+        : 'Validation passed against live API',
+      generatedTests: validatedTests,
+      validationSummary,
+      updatedAt: Date.now()
+    };
+    await checkpoint(validatedJob, contextKey);
+
+    return await finalizeGeneration(state, validatedJob, validatedTests, endpointsToGenerate.length, validationSummary, contextKey);
+  } catch (error) {
+    if (isContextCleared(contextKey)) {
+      return await loadState(contextKey);
+    }
+    if (isContextCancelled(contextKey)) {
+      cancelledContexts.delete(contextKey);
+      return await loadState(contextKey);
+    }
+    const snapshot = (await loadState(contextKey)).activeJob ?? job;
+    const qualitySnapshot = isBatchGenerationFailure(error)
       ? {
           ...snapshot,
           batchDiagnostics: [...(snapshot.batchDiagnostics ?? []), error.diagnostics],
@@ -355,10 +513,9 @@ const executeGeneration = async (
           statusText: error.diagnostics.assessment.issues[0]?.message ?? snapshot.statusText
         }
       : snapshot;
-    return await completeWithError(qualitySnapshot, error, state.settings.framework, contextId);
+    return await completeWithError(qualitySnapshot, error, state.settings.framework, contextKey);
   } finally {
-    activeAbortController = null;
-    generationInFlight = false;
+    await finishGenerationExecution(contextKey);
   }
 };
 
@@ -368,15 +525,11 @@ const runScanPipeline = async (
   contextId: string,
   options?: { resumeFromJob?: JobState; signal?: AbortSignal }
 ): Promise<AppState> => {
-  if (scanInFlight) {
-    throw new Error('Scan is already in progress.');
-  }
-
-  scanInFlight = true;
-  scanAbortController = new AbortController();
+  const contextKey = resolveContextId(contextId);
+  cancelledContexts.delete(contextKey);
+  clearedContexts.delete(contextKey);
+  const scanAbortController = await beginScanExecution(contextKey);
   const scanSignal = options?.signal ?? scanAbortController.signal;
-  clearedContexts.delete(contextId);
-  await startKeepAlive();
 
   const now = Date.now();
   const resumeJob = options?.resumeFromJob;
@@ -413,9 +566,9 @@ const runScanPipeline = async (
         }
       };
 
-  await setActiveJob(scanningJob, contextId);
+  await setActiveJob(scanningJob, contextKey);
   updateBadgeForJob(scanningJob);
-  emitProgress(await getStateSnapshot(contextId), contextId);
+  emitProgress(await getStateSnapshot(contextKey), contextKey);
 
   try {
     const files = await scanRepositoryFiles(repo, {
@@ -424,9 +577,11 @@ const runScanPipeline = async (
       signal: scanSignal
     });
 
-    if (isContextCleared(contextId) || scanSignal.aborted) {
-      await stopKeepAlive();
-      return await loadState(contextId);
+    if (isContextCleared(contextKey) || scanSignal.aborted || isContextCancelled(contextKey)) {
+      if (isContextCancelled(contextKey)) {
+        cancelledContexts.delete(contextKey);
+      }
+      return await loadState(contextKey);
     }
 
     const withFallback = applyOpenApiFallback(files, state.settings.openApiFallbackSpec);
@@ -439,7 +594,7 @@ const runScanPipeline = async (
       updatedAt: Date.now()
     };
 
-    await checkpoint(parsingJob, contextId);
+    await checkpoint(parsingJob, contextKey);
 
     const endpoints = parseApiMap(withFallback.files);
     const existingTestEndpointIds = detectExistingTestCoverage(withFallback.files, endpoints, state.settings.testDirectories);
@@ -453,9 +608,11 @@ const runScanPipeline = async (
       state.settings.includeCategories
     );
 
-    if (isContextCleared(contextId) || scanSignal.aborted) {
-      await stopKeepAlive();
-      return await loadState(contextId);
+    if (isContextCleared(contextKey) || scanSignal.aborted || isContextCancelled(contextKey)) {
+      if (isContextCancelled(contextKey)) {
+        cancelledContexts.delete(contextKey);
+      }
+      return await loadState(contextKey);
     }
 
     const completedAt = Date.now();
@@ -477,10 +634,9 @@ const runScanPipeline = async (
       }
     };
 
-    await stopKeepAlive();
-    const nextState = await replaceActiveJob(completedScan, contextId);
+    const nextState = await replaceActiveJob(completedScan, contextKey);
     updateBadgeForJob(completedScan);
-    emitProgress(nextState, contextId);
+    emitProgress(nextState, contextKey);
 
     notify(
       'APItiser scan complete',
@@ -488,14 +644,16 @@ const runScanPipeline = async (
     );
     return nextState;
   } catch (error) {
-    if (isContextCleared(contextId)) {
-      await stopKeepAlive();
-      return await loadState(contextId);
+    if (isContextCleared(contextKey)) {
+      return await loadState(contextKey);
     }
-    return await completeWithError(scanningJob, error, state.settings.framework, contextId);
+    if (isContextCancelled(contextKey)) {
+      cancelledContexts.delete(contextKey);
+      return await loadState(contextKey);
+    }
+    return await completeWithError(scanningJob, error, state.settings.framework, contextKey);
   } finally {
-    scanAbortController = null;
-    scanInFlight = false;
+    await finishScanExecution(contextKey);
   }
 };
 
@@ -514,7 +672,7 @@ const handleStartGeneration = async (
     throw new Error('No scanned endpoints available. Run Scan Repo first.');
   }
 
-  if (generationInFlight) {
+  if (generationInFlightContexts.has(contextId)) {
     throw new Error('Generation is already in progress.');
   }
 
@@ -564,16 +722,16 @@ const handleStartGeneration = async (
 };
 
 const handleCancel = async (contextId: string): Promise<AppState> => {
-  activeAbortController?.abort();
-  activeAbortController = null;
-  scanAbortController?.abort();
-  scanAbortController = null;
-
   const state = await loadState(contextId);
   if (!state.activeJob) {
     return state;
   }
 
+  cancelledContexts.add(contextId);
+  generationAbortControllers.get(contextId)?.abort();
+  scanAbortControllers.get(contextId)?.abort();
+  await finishGenerationExecution(contextId);
+  await finishScanExecution(contextId);
   return await completeWithCancel(state.activeJob, state.settings.framework, contextId);
 };
 
@@ -636,11 +794,11 @@ const handleValidateRepoAccess = async (
 
 const handleClearContext = async (contextId: string): Promise<AppState> => {
   clearedContexts.add(contextId);
-  activeAbortController?.abort();
-  activeAbortController = null;
-  scanAbortController?.abort();
-  scanAbortController = null;
-  await stopKeepAlive();
+  cancelledContexts.delete(contextId);
+  generationAbortControllers.get(contextId)?.abort();
+  scanAbortControllers.get(contextId)?.abort();
+  await finishGenerationExecution(contextId);
+  await finishScanExecution(contextId);
   const next = await clearContext(contextId);
   updateBadgeForJob(next.activeJob);
   emitStateSnapshot(next, contextId);
@@ -654,56 +812,85 @@ const autoResumeActiveJob = async (): Promise<void> => {
   autoResumeStarted = true;
 
   const allStates = await loadAllStates();
-  const resumable = Object.values(allStates).find((state) => Boolean(state.activeJob));
-  if (!resumable || generationInFlight || scanInFlight) {
+  const resumableStates = Object.values(allStates).filter((state) => Boolean(state.activeJob));
+  if (!resumableStates.length) {
     return;
   }
-  const state = resumable;
-  const contextId = state.contextId ?? 'global';
-  const job = state.activeJob!;
 
-  if (job.stage === 'generating') {
-    const queuedEndpoints = resolveQueuedEndpoints(job);
-    const remaining = Math.max(queuedEndpoints.length - job.completedBatches * state.settings.batchSize, 0);
+  for (const state of resumableStates) {
+    const contextId = state.contextId ?? 'global';
+    const job = state.activeJob!;
 
-    if (remaining > 0) {
-      const key = requiredProviderKey(state);
-      if (!key) {
-        await completeWithError(job, new Error('Cannot resume generation: missing provider API key.'), state.settings.framework, contextId);
-        return;
+    if (job.stage === 'generating') {
+      if (generationInFlightContexts.has(contextId)) {
+        continue;
       }
+
+      const queuedEndpoints = resolveQueuedEndpoints(job);
+      const remaining = Math.max(queuedEndpoints.length - job.completedBatches * state.settings.batchSize, 0);
+
+      if (remaining > 0) {
+        const key = requiredProviderKey(state);
+        if (!key) {
+          await completeWithError(job, new Error('Cannot resume generation: missing provider API key.'), state.settings.framework, contextId);
+          continue;
+        }
+      }
+
+      const resumed: JobState = {
+        ...job,
+        resumedFromCheckpoint: true,
+        statusText: `Resuming generation from batch ${Math.max(job.completedBatches + 1, 1)}`,
+        updatedAt: Date.now()
+      };
+
+      await checkpoint(resumed, contextId);
+      void executeGeneration(state, resumed, queuedEndpoints, resumed.completedBatches, resumed.generatedTests, contextId);
+      continue;
     }
 
-    const resumed: JobState = {
-      ...job,
-      resumedFromCheckpoint: true,
-      statusText: `Resuming generation from batch ${Math.max(job.completedBatches + 1, 1)}`,
-      updatedAt: Date.now()
-    };
+    if (job.stage === 'packaging') {
+      if (generationInFlightContexts.has(contextId)) {
+        continue;
+      }
 
-    await checkpoint(resumed, contextId);
-    void executeGeneration(state, resumed, queuedEndpoints, resumed.completedBatches, resumed.generatedTests, contextId);
-    return;
-  }
-
-  if (job.stage === 'packaging') {
-    const resumed: JobState = {
-      ...job,
-      resumedFromCheckpoint: true,
-      statusText: 'Resuming packaging from checkpoint',
-      updatedAt: Date.now()
-    };
-    await checkpoint(resumed, contextId);
-    void finalizeGeneration(state, resumed, resumed.generatedTests, resolveQueuedEndpoints(resumed).length, contextId);
-    return;
-  }
-
-  if (job.stage === 'scanning' || job.stage === 'parsing') {
-    if (!job.repo) {
-      await completeWithError(job, new Error('Scan checkpoint is missing repository context.'), state.settings.framework, contextId);
-      return;
+      const resumed: JobState = {
+        ...job,
+        resumedFromCheckpoint: true,
+        statusText: 'Resuming packaging from checkpoint',
+        updatedAt: Date.now()
+      };
+      await checkpoint(resumed, contextId);
+      void (async () => {
+        try {
+          await beginGenerationExecution(contextId);
+          await finalizeGeneration(state, resumed, resumed.generatedTests, resolveQueuedEndpoints(resumed).length, undefined, contextId);
+        } catch (error) {
+          if (isContextCleared(contextId)) {
+            return;
+          }
+          if (isContextCancelled(contextId)) {
+            cancelledContexts.delete(contextId);
+            return;
+          }
+          await completeWithError(resumed, error, state.settings.framework, contextId);
+        } finally {
+          await finishGenerationExecution(contextId);
+        }
+      })();
+      continue;
     }
-    void runScanPipeline(state, job.repo, contextId, { resumeFromJob: job });
+
+    if (job.stage === 'scanning' || job.stage === 'parsing') {
+      if (scanInFlightContexts.has(contextId)) {
+        continue;
+      }
+      if (!job.repo) {
+        await completeWithError(job, new Error('Scan checkpoint is missing repository context.'), state.settings.framework, contextId);
+        continue;
+      }
+      void runScanPipeline(state, job.repo, contextId, { resumeFromJob: job });
+    }
   }
 };
 

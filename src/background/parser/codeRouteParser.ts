@@ -48,6 +48,9 @@ interface FileAnalysis {
   defaultExportOwner?: string;
 }
 
+const GO_FILE_REGEX = /\.go$/i;
+const JAVA_FILE_REGEX = /\.java$/i;
+
 const normalizeFsPath = (input: string): string => {
   const parts = input.split('/');
   const normalized: string[] = [];
@@ -903,6 +906,138 @@ const parsePythonRoutes = (files: RepoFile[]): RouteSignal[] => {
   return routes;
 };
 
+const parseGoRoutes = (files: RepoFile[]): RouteSignal[] => {
+  const routes: RouteSignal[] = [];
+
+  for (const file of files) {
+    if (!GO_FILE_REGEX.test(file.path)) {
+      continue;
+    }
+
+    const groupPrefixes = new Map<string, string>();
+    for (const match of file.content.matchAll(/\b(\w+)\s*:=\s*\w+\.Group\(\s*"([^"]+)"\s*\)/g)) {
+      groupPrefixes.set(match[1], normalizePath(match[2]));
+    }
+
+    for (const match of file.content.matchAll(/\b(\w+)\.(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\(\s*"([^"]+)"/g)) {
+      const owner = match[1];
+      const prefix = groupPrefixes.get(owner) ?? '';
+      routes.push({
+        method: match[2].toUpperCase(),
+        path: joinPath(prefix, match[3]),
+        source: 'gin',
+        owner,
+        file,
+        confidence: prefix ? 0.88 : 0.84,
+        evidence: [makeEvidence(file, 'gin route registration', match.index ?? undefined)]
+      });
+    }
+  }
+
+  return routes;
+};
+
+const parseSpringRoutes = (files: RepoFile[]): RouteSignal[] => {
+  const routes: RouteSignal[] = [];
+
+  for (const file of files) {
+    if (!JAVA_FILE_REGEX.test(file.path)) {
+      continue;
+    }
+
+    const classPrefixMatch = file.content.match(/@RequestMapping\((?:value|path)?\s*=?\s*\{?\s*"([^"]+)"/);
+    const classPrefix = classPrefixMatch ? normalizePath(classPrefixMatch[1]) : '';
+
+    for (const match of file.content.matchAll(/@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\(([\s\S]*?)\)/g)) {
+      const annotation = match[1];
+      const annotationBody = match[2];
+      const pathMatch = annotationBody.match(/(?:value|path)?\s*=?\s*\{?\s*"([^"]+)"/);
+      const methodMatch = annotationBody.match(/RequestMethod\.(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)/);
+      if (annotation === 'RequestMapping' && !methodMatch) {
+        continue;
+      }
+      const method = annotation === 'RequestMapping'
+        ? (methodMatch?.[1] ?? 'GET')
+        : annotation.replace('Mapping', '').replace('Get', 'GET').replace('Post', 'POST').replace('Put', 'PUT').replace('Patch', 'PATCH').replace('Delete', 'DELETE');
+      const methodPath = pathMatch?.[1] ?? '';
+
+      routes.push({
+        method: method.toUpperCase(),
+        path: joinPath(classPrefix, methodPath.replace(/\{([A-Za-z0-9_]+)\}/g, ':$1')),
+        source: 'spring',
+        owner: 'controller',
+        file,
+        confidence: classPrefix ? 0.9 : 0.86,
+        evidence: [makeEvidence(file, 'spring controller mapping', match.index ?? undefined)]
+      });
+    }
+  }
+
+  return routes;
+};
+
+const inferAuthMetadata = (content: string): { auth: ApiEndpoint['auth']; authHints?: ApiEndpoint['authHints'] } => {
+  const hints: NonNullable<ApiEndpoint['authHints']> = [];
+  const lower = content.toLowerCase();
+
+  if (/oauth|openid|passport|auth0/.test(lower)) {
+    hints.push({
+      type: 'oauth2',
+      headerName: 'Authorization',
+      setupSteps: ['Provide API_TOKEN for OAuth-protected endpoints.'],
+      confidence: 0.8,
+      evidence: 'Source code references OAuth/OpenID auth.'
+    });
+  }
+
+  if (/authorization|bearer|jwt|token|guard/.test(lower)) {
+    hints.push({
+      type: hints.length ? hints[0].type : 'bearer',
+      headerName: 'Authorization',
+      setupSteps: ['Provide API_TOKEN for authenticated requests.'],
+      confidence: 0.72,
+      evidence: 'Source code references token/bearer auth.'
+    });
+  }
+
+  const apiKeyHeaderMatch = content.match(/\b(X-[A-Za-z-]*API[-_]KEY|X-API-KEY|api-key)\b/i);
+  if (apiKeyHeaderMatch) {
+    hints.push({
+      type: 'apiKey',
+      headerName: apiKeyHeaderMatch[1],
+      setupSteps: ['Provide API_KEY for authenticated requests.'],
+      confidence: 0.78,
+      evidence: 'Source code references API key headers.'
+    });
+  }
+
+  if (/cookie|set-cookie|express-session|req\.session|session/.test(lower)) {
+    hints.push({
+      type: 'cookieSession',
+      cookieName: 'session',
+      setupSteps: ['Provide SESSION_COOKIE during validation when session auth is required.'],
+      confidence: 0.7,
+      evidence: 'Source code references cookies/session state.'
+    });
+  }
+
+  if (/csrf|xsrf/.test(lower)) {
+    hints.push({
+      type: 'csrf',
+      csrfHeaderName: 'X-CSRF-Token',
+      setupSteps: ['Provide CSRF_TOKEN for mutating requests protected by CSRF middleware.'],
+      confidence: 0.68,
+      evidence: 'Source code references CSRF/XSRF protection.'
+    });
+  }
+
+  const auth = hints[0]?.type ?? 'unknown';
+  return {
+    auth,
+    authHints: hints.length ? hints : undefined
+  };
+};
+
 const toApiEndpoints = (signals: RouteSignal[]): ApiEndpoint[] => {
   const endpoints: ApiEndpoint[] = [];
   const seen = new Set<string>();
@@ -912,7 +1047,7 @@ const toApiEndpoints = (signals: RouteSignal[]): ApiEndpoint[] => {
       continue;
     }
     seen.add(key);
-    const auth: ApiEndpoint['auth'] = /auth|token|bearer|guard/i.test(signal.file.content) ? 'bearer' : 'unknown';
+    const { auth, authHints } = inferAuthMetadata(signal.file.content);
     endpoints.push(
       buildEndpoint({
         method: signal.method,
@@ -920,8 +1055,22 @@ const toApiEndpoints = (signals: RouteSignal[]): ApiEndpoint[] => {
         source: signal.source,
         file: signal.file,
         auth,
+        authHints,
         confidence: signal.confidence,
-        evidence: signal.evidence
+        evidence: signal.evidence,
+        examples: authHints?.length
+          ? [{
+              origin: 'code',
+              request: {
+                headers: Object.fromEntries(
+                  authHints
+                    .filter((hint) => hint.headerName)
+                    .map((hint) => [hint.headerName!, hint.type === 'apiKey' ? '{{API_KEY}}' : 'Bearer {{API_TOKEN}}'])
+                )
+              },
+              note: 'Auth/session example inferred from source code.'
+            }]
+          : undefined
       })
     );
   }
@@ -936,6 +1085,8 @@ export const parseCodeRoutes = (files: RepoFile[]): ApiEndpoint[] => {
 
   const mountedSignals = applyMounts(analyses);
   const pythonSignals = parsePythonRoutes(files);
+  const goSignals = parseGoRoutes(files);
+  const springSignals = parseSpringRoutes(files);
 
-  return toApiEndpoints([...mountedSignals, ...pythonSignals]);
+  return toApiEndpoints([...mountedSignals, ...pythonSignals, ...goSignals, ...springSignals]);
 };

@@ -19,5 +19,16 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   openApiFallbackSpec: '',
   batchSize: 6,
   timeoutMs: 5 * 60 * 1000,
-  gitlabBaseUrl: 'https://gitlab.com'
+  gitlabBaseUrl: 'https://gitlab.com',
+  validateGeneratedTests: true,
+  autoRepairFailingTests: true,
+  maxValidationRepairs: 2,
+  csrfHeaderName: 'X-CSRF-Token',
+  apiKeyHeaderName: 'X-API-Key',
+  runtimeApiToken: '',
+  runtimeApiKey: '',
+  runtimeCsrfToken: '',
+  runtimeSessionCookie: '',
+  runtimeAuthMode: 'none',
+  runtimeSetupSteps: []
 };

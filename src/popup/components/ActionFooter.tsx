@@ -1,4 +1,4 @@
-import type { AppState } from '@shared/types';
+import type { AppState, ReadinessState } from '@shared/types';
 
 interface ActionFooterProps {
   busy: boolean;
@@ -15,6 +15,8 @@ interface ActionFooterProps {
   onClear: () => void;
   onExportPostman?: () => void;
   jobStage?: AppState['activeJob'] extends null ? undefined : string;
+  readiness?: ReadinessState;
+  readinessNotes?: string[];
 }
 
 export function ActionFooter({
@@ -32,9 +34,21 @@ export function ActionFooter({
   onClear,
   onExportPostman,
   jobStage,
+  readiness,
+  readinessNotes,
 }: ActionFooterProps) {
+  const readinessLabel = readiness
+    ? readiness.replace(/_/g, ' ')
+    : null;
+
   return (
     <footer className="actions">
+      {readinessLabel ? (
+        <p className={`subtle readiness readiness-${readiness}`}>
+          Readiness: <strong>{readinessLabel}</strong>
+          {readinessNotes?.[0] ? ` • ${readinessNotes[0]}` : ''}
+        </p>
+      ) : null}
       <button type="button" onClick={onScan} disabled={busy || !hasRepo}>
         Scan Repo
       </button>
@@ -46,7 +60,7 @@ export function ActionFooter({
         Generate Tests
       </button>
       <button type="button" onClick={onDownload} disabled={!hasArtifact}>
-        Download Tests
+        Download {readiness === 'production_candidate' ? 'Validated Tests' : 'Tests'}
       </button>
       {jobStage === 'complete' && onExportPostman ? (
         <button type="button" className="ghost" onClick={onExportPostman}>

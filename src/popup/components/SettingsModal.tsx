@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { PROVIDER_MODELS } from '@shared/constants';
-import type { AppState, TestCategory } from '@shared/types';
+import type { AppState, RuntimeSetupStep, TestCategory } from '@shared/types';
 
 type KeyProvider = 'openai' | 'claude' | 'gemini';
 
@@ -43,6 +43,94 @@ interface SettingsModalProps {
   onImportSettings: (file: File | null | undefined) => void;
 }
 
+interface SetupStepDraft {
+  id: string;
+  name: string;
+  method: string;
+  path: string;
+  expectedStatus: string;
+  headersText: string;
+  queryText: string;
+  bodyText: string;
+  extractJsonApiToken: string;
+  extractJsonApiKey: string;
+  extractJsonCsrfToken: string;
+  extractJsonSessionCookie: string;
+  extractHeaderApiToken: string;
+  extractHeaderApiKey: string;
+  extractHeaderCsrfToken: string;
+  extractHeaderSessionCookie: string;
+  extractCookieName: string;
+}
+
+const stringifyDraftValue = (value: unknown): string => {
+  if (value === undefined) {
+    return '';
+  }
+  return JSON.stringify(value, null, 2);
+};
+
+const parseOptionalJson = (label: string, value: string): unknown => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    throw new Error(`${label} must be valid JSON.`);
+  }
+};
+
+const createDraftFromStep = (step?: RuntimeSetupStep): SetupStepDraft => ({
+  id: step?.id ?? `step-${Date.now()}`,
+  name: step?.name ?? 'Login',
+  method: step?.method ?? 'POST',
+  path: step?.path ?? '/auth/login',
+  expectedStatus: step?.expectedStatus ? String(step.expectedStatus) : '200',
+  headersText: stringifyDraftValue(step?.headers),
+  queryText: stringifyDraftValue(step?.query),
+  bodyText: stringifyDraftValue(step?.body),
+  extractJsonApiToken: step?.extractJsonPaths?.apiToken ?? '',
+  extractJsonApiKey: step?.extractJsonPaths?.apiKey ?? '',
+  extractJsonCsrfToken: step?.extractJsonPaths?.csrfToken ?? '',
+  extractJsonSessionCookie: step?.extractJsonPaths?.sessionCookie ?? '',
+  extractHeaderApiToken: step?.extractHeaders?.apiToken ?? '',
+  extractHeaderApiKey: step?.extractHeaders?.apiKey ?? '',
+  extractHeaderCsrfToken: step?.extractHeaders?.csrfToken ?? '',
+  extractHeaderSessionCookie: step?.extractHeaders?.sessionCookie ?? '',
+  extractCookieName: step?.extractCookieName ?? ''
+});
+
+const draftToStep = (draft: SetupStepDraft): RuntimeSetupStep => {
+  const extractJsonPaths = {
+    apiToken: draft.extractJsonApiToken.trim(),
+    apiKey: draft.extractJsonApiKey.trim(),
+    csrfToken: draft.extractJsonCsrfToken.trim(),
+    sessionCookie: draft.extractJsonSessionCookie.trim()
+  };
+  const extractHeaders = {
+    apiToken: draft.extractHeaderApiToken.trim(),
+    apiKey: draft.extractHeaderApiKey.trim(),
+    csrfToken: draft.extractHeaderCsrfToken.trim(),
+    sessionCookie: draft.extractHeaderSessionCookie.trim()
+  };
+
+  return {
+    id: draft.id.trim(),
+    name: draft.name.trim(),
+    method: draft.method.trim().toUpperCase(),
+    path: draft.path.trim(),
+    headers: parseOptionalJson('Headers', draft.headersText) as Record<string, string> | undefined,
+    query: parseOptionalJson('Query', draft.queryText) as Record<string, unknown> | undefined,
+    body: parseOptionalJson('Body', draft.bodyText),
+    expectedStatus: draft.expectedStatus.trim() ? Number(draft.expectedStatus.trim()) : undefined,
+    extractJsonPaths: Object.values(extractJsonPaths).some(Boolean) ? extractJsonPaths : undefined,
+    extractHeaders: Object.values(extractHeaders).some(Boolean) ? extractHeaders : undefined,
+    extractCookieName: draft.extractCookieName.trim() || undefined
+  };
+};
+
 export function SettingsModal({
   appState,
   testDirsInput,
@@ -63,9 +151,50 @@ export function SettingsModal({
   onImportSettings,
 }: SettingsModalProps) {
   const [keyWarning, setKeyWarning] = useState('');
+  const [runtimeSetupDrafts, setRuntimeSetupDrafts] = useState<SetupStepDraft[]>([]);
+  const [runtimeSetupInput, setRuntimeSetupInput] = useState('[]');
+  const [runtimeSetupError, setRuntimeSetupError] = useState('');
 
   const selectedProvider = appState?.settings.provider ?? 'openai';
   const availableModels = PROVIDER_MODELS[selectedProvider];
+  const selectedProviderKey =
+    selectedProvider === 'openai'
+      ? appState?.settings.openAiKey ?? ''
+      : selectedProvider === 'claude'
+        ? appState?.settings.claudeKey ?? ''
+        : appState?.settings.geminiKey ?? '';
+  const [apiKeyInput, setApiKeyInput] = useState(selectedProviderKey);
+
+  useEffect(() => {
+    setApiKeyInput(selectedProviderKey);
+    setKeyWarning('');
+  }, [selectedProvider, selectedProviderKey]);
+
+  useEffect(() => {
+    const nextDrafts = (appState?.settings.runtimeSetupSteps ?? []).map((step) => createDraftFromStep(step));
+    setRuntimeSetupDrafts(nextDrafts);
+    setRuntimeSetupInput(JSON.stringify(appState?.settings.runtimeSetupSteps ?? [], null, 2));
+    setRuntimeSetupError('');
+  }, [appState?.settings.runtimeSetupSteps]);
+
+  const persistRuntimeSetupDrafts = (nextDrafts: SetupStepDraft[]) => {
+    setRuntimeSetupDrafts(nextDrafts);
+    try {
+      const parsed = nextDrafts.map((draft) => draftToStep(draft));
+      onPatchSettings({ runtimeSetupSteps: parsed });
+      setRuntimeSetupInput(JSON.stringify(parsed, null, 2));
+      setRuntimeSetupError('');
+    } catch (error) {
+      setRuntimeSetupError(error instanceof Error ? error.message : 'Invalid setup step values.');
+    }
+  };
+
+  const updateRuntimeSetupDraft = (index: number, patch: Partial<SetupStepDraft>) => {
+    const nextDrafts = runtimeSetupDrafts.map((draft, draftIndex) => (
+      draftIndex === index ? { ...draft, ...patch } : draft
+    ));
+    persistRuntimeSetupDrafts(nextDrafts);
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -120,13 +249,8 @@ export function SettingsModal({
             <input
               type="password"
               placeholder="Paste provider API key"
-              defaultValue={
-                selectedProvider === 'openai'
-                  ? appState?.settings.openAiKey ?? ''
-                  : selectedProvider === 'claude'
-                    ? appState?.settings.claudeKey ?? ''
-                    : appState?.settings.geminiKey ?? ''
-              }
+              value={apiKeyInput}
+              onChange={(event) => setApiKeyInput(event.target.value)}
               onBlur={(event) => {
                 const trimmed = event.target.value.trim();
                 const warning = validateApiKey(trimmed, selectedProvider as KeyProvider);
@@ -263,6 +387,74 @@ export function SettingsModal({
             />
             Skip endpoints that already have tests
           </label>
+          <label className="inline-toggle">
+            <input
+              type="checkbox"
+              checked={appState?.settings.validateGeneratedTests ?? true}
+              onChange={(event) => onPatchSettings({ validateGeneratedTests: event.target.checked })}
+            />
+            Validate generated tests against Base URL before packaging
+          </label>
+          <label className="inline-toggle">
+            <input
+              type="checkbox"
+              checked={appState?.settings.autoRepairFailingTests ?? true}
+              onChange={(event) => onPatchSettings({ autoRepairFailingTests: event.target.checked })}
+            />
+            Auto-repair tests that fail live validation
+          </label>
+          <label>
+            Validation Repair Rounds
+            <input
+              type="number"
+              min={0}
+              max={5}
+              value={appState?.settings.maxValidationRepairs ?? 2}
+              onChange={(event) => onPatchSettings({ maxValidationRepairs: Number(event.target.value) })}
+            />
+          </label>
+          <div className="grid two">
+            <label>
+              Runtime Auth Mode
+              <select
+                value={appState?.settings.runtimeAuthMode ?? 'none'}
+                onChange={(event) => onPatchSettings({ runtimeAuthMode: event.target.value as AppState['settings']['runtimeAuthMode'] })}
+              >
+                <option value="none">None</option>
+                <option value="bearer">Bearer token</option>
+                <option value="apiKey">API key</option>
+                <option value="cookieSession">Cookie session</option>
+                <option value="oauth2">OAuth2 bearer</option>
+              </select>
+            </label>
+            <label>
+              API Key Header Name
+              <input
+                type="text"
+                value={appState?.settings.apiKeyHeaderName ?? 'X-API-Key'}
+                onChange={(event) => onPatchSettings({ apiKeyHeaderName: event.target.value.trim() })}
+                placeholder="X-API-Key"
+              />
+            </label>
+            <label>
+              Session Cookie Name
+              <input
+                type="text"
+                value={appState?.settings.sessionCookieName ?? ''}
+                onChange={(event) => onPatchSettings({ sessionCookieName: event.target.value.trim() })}
+                placeholder="session"
+              />
+            </label>
+            <label>
+              CSRF Header Name
+              <input
+                type="text"
+                value={appState?.settings.csrfHeaderName ?? 'X-CSRF-Token'}
+                onChange={(event) => onPatchSettings({ csrfHeaderName: event.target.value.trim() })}
+                placeholder="X-CSRF-Token"
+              />
+            </label>
+          </div>
 
           <div className="category-row">
             {(['positive', 'negative', 'edge', 'security'] as const).map((category) => (
@@ -288,6 +480,295 @@ export function SettingsModal({
               placeholder="Always test pagination with limit=0. Use project-specific auth header X-Custom-Auth."
             />
           </label>
+          <div className="grid two">
+            <label>
+              Runtime API Token
+              <input
+                type="password"
+                value={appState?.settings.runtimeApiToken ?? ''}
+                onChange={(event) => onPatchSettings({ runtimeApiToken: event.target.value.trim() })}
+                placeholder="Used only for live validation"
+              />
+            </label>
+            <label>
+              Runtime API Key
+              <input
+                type="password"
+                value={appState?.settings.runtimeApiKey ?? ''}
+                onChange={(event) => onPatchSettings({ runtimeApiKey: event.target.value.trim() })}
+                placeholder="Used only for live validation"
+              />
+            </label>
+            <label>
+              Runtime Session Cookie
+              <input
+                type="password"
+                value={appState?.settings.runtimeSessionCookie ?? ''}
+                onChange={(event) => onPatchSettings({ runtimeSessionCookie: event.target.value.trim() })}
+                placeholder="session=..."
+              />
+            </label>
+            <label>
+              Runtime CSRF Token
+              <input
+                type="password"
+                value={appState?.settings.runtimeCsrfToken ?? ''}
+                onChange={(event) => onPatchSettings({ runtimeCsrfToken: event.target.value.trim() })}
+                placeholder="Used only for live validation"
+              />
+            </label>
+          </div>
+          <div className="settings-group">
+            <h3>Validation Setup Flow</h3>
+            <p className="subtle">
+              Build setup steps for login, token exchange, CSRF bootstrap, or prerequisite resource creation before live validation runs.
+            </p>
+            <div className="grid two">
+              <button
+                type="button"
+                className="ghost utility-btn"
+                onClick={() => persistRuntimeSetupDrafts([...runtimeSetupDrafts, createDraftFromStep()])}
+              >
+                Add Login Step
+              </button>
+              <button
+                type="button"
+                className="ghost utility-btn"
+                onClick={() => persistRuntimeSetupDrafts([
+                  ...runtimeSetupDrafts,
+                  createDraftFromStep({
+                    id: `setup-${Date.now()}`,
+                    name: 'Seed Fixture',
+                    method: 'POST',
+                    path: '/test/seed',
+                    expectedStatus: 201
+                  })
+                ])}
+              >
+                Add Fixture Step
+              </button>
+            </div>
+            {runtimeSetupDrafts.length === 0 ? (
+              <p className="subtle">No setup steps configured.</p>
+            ) : null}
+            {runtimeSetupDrafts.map((draft, index) => (
+              <div key={draft.id || `draft-${index}`} className="panel">
+                <div className="grid two">
+                  <label>
+                    Step Name
+                    <input
+                      type="text"
+                      value={draft.name}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { name: event.target.value })}
+                      placeholder="Login"
+                    />
+                  </label>
+                  <label>
+                    Step ID
+                    <input
+                      type="text"
+                      value={draft.id}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { id: event.target.value })}
+                      placeholder="login"
+                    />
+                  </label>
+                  <label>
+                    Method
+                    <select
+                      value={draft.method}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { method: event.target.value })}
+                    >
+                      {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => (
+                        <option key={method} value={method}>{method}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Path
+                    <input
+                      type="text"
+                      value={draft.path}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { path: event.target.value })}
+                      placeholder="/auth/login"
+                    />
+                  </label>
+                  <label>
+                    Expected Status
+                    <input
+                      type="number"
+                      min={100}
+                      max={599}
+                      value={draft.expectedStatus}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { expectedStatus: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Extract Cookie Name
+                    <input
+                      type="text"
+                      value={draft.extractCookieName}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractCookieName: event.target.value })}
+                      placeholder="session"
+                    />
+                  </label>
+                </div>
+                <div className="grid two">
+                  <label>
+                    Headers JSON
+                    <textarea
+                      className="spec-input"
+                      rows={4}
+                      value={draft.headersText}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { headersText: event.target.value })}
+                      placeholder='{"Content-Type":"application/json"}'
+                    />
+                  </label>
+                  <label>
+                    Query JSON
+                    <textarea
+                      className="spec-input"
+                      rows={4}
+                      value={draft.queryText}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { queryText: event.target.value })}
+                      placeholder='{"workspace":"qa"}'
+                    />
+                  </label>
+                </div>
+                <label>
+                  Body JSON
+                  <textarea
+                    className="spec-input"
+                    rows={4}
+                    value={draft.bodyText}
+                    onChange={(event) => updateRuntimeSetupDraft(index, { bodyText: event.target.value })}
+                    placeholder='{"email":"qa@example.com","password":"secret"}'
+                  />
+                </label>
+                <div className="grid two">
+                  <label>
+                    JSON Path: API Token
+                    <input
+                      type="text"
+                      value={draft.extractJsonApiToken}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonApiToken: event.target.value })}
+                      placeholder="token"
+                    />
+                  </label>
+                  <label>
+                    JSON Path: API Key
+                    <input
+                      type="text"
+                      value={draft.extractJsonApiKey}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonApiKey: event.target.value })}
+                      placeholder="credentials.apiKey"
+                    />
+                  </label>
+                  <label>
+                    JSON Path: CSRF Token
+                    <input
+                      type="text"
+                      value={draft.extractJsonCsrfToken}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonCsrfToken: event.target.value })}
+                      placeholder="csrf.token"
+                    />
+                  </label>
+                  <label>
+                    JSON Path: Session Cookie Value
+                    <input
+                      type="text"
+                      value={draft.extractJsonSessionCookie}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonSessionCookie: event.target.value })}
+                      placeholder="session.value"
+                    />
+                  </label>
+                  <label>
+                    Header: API Token
+                    <input
+                      type="text"
+                      value={draft.extractHeaderApiToken}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderApiToken: event.target.value })}
+                      placeholder="x-api-token"
+                    />
+                  </label>
+                  <label>
+                    Header: API Key
+                    <input
+                      type="text"
+                      value={draft.extractHeaderApiKey}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderApiKey: event.target.value })}
+                      placeholder="x-api-key"
+                    />
+                  </label>
+                  <label>
+                    Header: CSRF Token
+                    <input
+                      type="text"
+                      value={draft.extractHeaderCsrfToken}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderCsrfToken: event.target.value })}
+                      placeholder="x-csrf-token"
+                    />
+                  </label>
+                  <label>
+                    Header: Session Cookie Value
+                    <input
+                      type="text"
+                      value={draft.extractHeaderSessionCookie}
+                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderSessionCookie: event.target.value })}
+                      placeholder="set-cookie"
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  className="ghost utility-btn"
+                  onClick={() => persistRuntimeSetupDrafts(runtimeSetupDrafts.filter((_, draftIndex) => draftIndex !== index))}
+                >
+                  Remove Step
+                </button>
+              </div>
+            ))}
+            <label>
+              Advanced JSON Editor
+              <textarea
+                className="spec-input"
+                rows={8}
+                value={runtimeSetupInput}
+                onChange={(event) => {
+                  setRuntimeSetupInput(event.target.value);
+                  setRuntimeSetupError('');
+                }}
+                onBlur={() => {
+                  try {
+                    const parsed = JSON.parse(runtimeSetupInput);
+                    if (!Array.isArray(parsed)) {
+                      throw new Error('Setup flow must be a JSON array.');
+                    }
+                    const nextDrafts = parsed.map((step) => createDraftFromStep(step as RuntimeSetupStep));
+                    setRuntimeSetupDrafts(nextDrafts);
+                    onPatchSettings({ runtimeSetupSteps: parsed as RuntimeSetupStep[] });
+                    setRuntimeSetupError('');
+                  } catch (error) {
+                    setRuntimeSetupError(error instanceof Error ? error.message : 'Invalid setup flow JSON.');
+                  }
+                }}
+                placeholder={`[
+  {
+    "id": "login",
+    "name": "Login",
+    "method": "POST",
+    "path": "/auth/login",
+    "body": { "email": "qa@example.com", "password": "secret" },
+    "extractJsonPaths": { "apiToken": "token" },
+    "expectedStatus": 200
+  }
+]`}
+              />
+            </label>
+            {runtimeSetupError ? <small className="key-warning">{runtimeSetupError}</small> : null}
+            <small className="subtle">
+              Runtime setup flows are excluded from settings export.
+            </small>
+          </div>
         </div>
 
         {/* OpenAPI Fallback */}
@@ -345,7 +826,7 @@ export function SettingsModal({
               />
             </label>
           </div>
-          <p className="subtle">API keys are excluded from export.</p>
+          <p className="subtle">Provider keys and runtime validation secrets/setup flows are excluded from export.</p>
         </div>
 
         {/* Help & Policy */}

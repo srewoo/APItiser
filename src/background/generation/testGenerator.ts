@@ -1,5 +1,5 @@
 import { chunkArray } from '@background/utils/chunks';
-import { getProviderAdapter } from '@background/llm/client';
+import { loadProviderAdapter } from '@background/llm/client';
 import { buildExamplePath, defaultExpectedStatus, METHOD_DEFAULTS, sampleValueForParam } from '@background/llm/endpointUtils';
 import { getFrameworkAdapter } from './frameworks/registry';
 import type {
@@ -11,8 +11,10 @@ import type {
   GeneratedTestCase,
   GenerateContext,
   JobState,
+  ProjectMeta,
   QualityIssue,
-  RepoRef
+  RepoRef,
+  ValidationSummary
 } from '@shared/types';
 
 interface GenerateOptions {
@@ -56,6 +58,55 @@ const normalizeHeaders = (value: unknown): Record<string, string> => {
 };
 
 const normalizeQuery = (value: unknown): Record<string, unknown> => (isRecord(value) ? value : {});
+
+const getAuthPlaceholderValue = (hintType?: ApiEndpoint['auth']): string =>
+  hintType === 'apiKey' ? '{{API_KEY}}' : hintType === 'csrf' ? '{{CSRF_TOKEN}}' : 'Bearer {{API_TOKEN}}';
+
+const defaultAuthHeadersForEndpoint = (endpoint: ApiEndpoint): Record<string, string> => {
+  const headers: Record<string, string> = {};
+
+  for (const hint of endpoint.authHints ?? []) {
+    if (hint.headerName) {
+      headers[hint.headerName] = getAuthPlaceholderValue(hint.type);
+    }
+  }
+
+  if (!Object.keys(headers).length && (endpoint.auth === 'bearer' || endpoint.auth === 'oauth2')) {
+    headers.Authorization = 'Bearer {{API_TOKEN}}';
+  }
+
+  return headers;
+};
+
+const normalizeResponseHeaders = (value: unknown): Record<string, string> => normalizeHeaders(value);
+
+const defaultResponseForStatus = (endpoint: ApiEndpoint, status: number) =>
+  endpoint.responses.find((response) => Number(response.status) === status)
+  ?? endpoint.responses.find((response) => Number(response.status) >= 200 && Number(response.status) < 300);
+
+const defaultContractChecks = (endpoint: ApiEndpoint, category: GeneratedTestCase['category']): string[] => {
+  const checks: string[] = [];
+  if (endpoint.responses.some((response) => Boolean(response.schema))) {
+    checks.push('response matches documented schema');
+  }
+  if (endpoint.queryParams.some((param) => /page|limit|offset|cursor/i.test(param.name))) {
+    checks.push('pagination semantics preserved');
+  }
+  if (category === 'security') {
+    checks.push('auth boundary enforced');
+  }
+  if (['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'].includes(endpoint.method)) {
+    checks.push('request remains idempotent');
+  }
+  return checks;
+};
+
+const isLikelyPaginatedEndpoint = (endpoint: ApiEndpoint): boolean =>
+  endpoint.queryParams.some((param) => /page|limit|offset|cursor/i.test(param.name))
+  || /(page|limit|offset|cursor|search|list|collection)/i.test(endpoint.path);
+
+const inferredTrustLabel = (score: number): GeneratedTestCase['trustLabel'] =>
+  score >= 82 ? 'high' : score >= 62 ? 'medium' : 'heuristic';
 
 const endpointPathToRegex = (path: string): RegExp => {
   const escaped = path
@@ -157,6 +208,118 @@ const securityTestLooksWeak = (endpoint: ApiEndpoint, test: GeneratedTestCase): 
   return !hasAuthFailureStatus && !mentionsSecurityBehavior;
 };
 
+const repairTestKey = (test: GeneratedTestCase): string => `${test.endpointId}::${test.category}`;
+
+const assertionStrength = (test: GeneratedTestCase): number =>
+  (test.expected.contains?.length ?? 0)
+  + (test.expected.contentType ? 2 : 0)
+  + Object.keys(test.expected.responseHeaders ?? {}).length
+  + (test.expected.jsonSchema ? 3 : 0)
+  + (test.expected.contractChecks?.length ?? 0)
+  + (test.expected.pagination ? 1 : 0)
+  + (test.expected.idempotent ? 1 : 0);
+
+const requestHasAuthMaterial = (test: GeneratedTestCase): boolean => {
+  const headers = test.request.headers ?? {};
+  return Object.keys(headers).some((headerName) => /authorization|api[-_]key|cookie|csrf/i.test(headerName));
+};
+
+const allowRepairToChangeStatus = (issues: QualityIssue[]): boolean =>
+  issues.some((issue) => ['invalid-status', 'execution-status', 'execution-auth'].includes(issue.code));
+
+const isSafeRepairReplacement = (
+  endpoint: ApiEndpoint,
+  previous: GeneratedTestCase,
+  candidate: GeneratedTestCase,
+  issues: QualityIssue[]
+): boolean => {
+  if (candidate.endpointId !== previous.endpointId || candidate.category !== previous.category) {
+    return false;
+  }
+
+  if (candidate.request.method !== previous.request.method) {
+    return false;
+  }
+
+  if (!endpointPathToRegex(endpoint.path).test(candidate.request.path) || hasPlaceholders(candidate.request.path)) {
+    return false;
+  }
+
+  if (!allowRepairToChangeStatus(issues) && candidate.expected.status !== previous.expected.status) {
+    return false;
+  }
+
+  if (previous.expected.contentType && !candidate.expected.contentType) {
+    return false;
+  }
+
+  if (previous.expected.jsonSchema && !candidate.expected.jsonSchema) {
+    return false;
+  }
+
+  if ((previous.expected.contractChecks?.length ?? 0) > (candidate.expected.contractChecks?.length ?? 0)) {
+    return false;
+  }
+
+  if (Object.keys(previous.expected.responseHeaders ?? {}).length > Object.keys(candidate.expected.responseHeaders ?? {}).length) {
+    return false;
+  }
+
+  if (requestHasAuthMaterial(previous) && !requestHasAuthMaterial(candidate) && previous.category !== 'security') {
+    return false;
+  }
+
+  if (assertionStrength(candidate) < assertionStrength(previous)) {
+    return false;
+  }
+
+  if (!titleIsGeneric(previous.title, endpoint) && titleIsGeneric(candidate.title, endpoint)) {
+    return false;
+  }
+
+  return true;
+};
+
+const mergeSafeRepairs = (
+  previousTests: GeneratedTestCase[],
+  repairedTests: GeneratedTestCase[],
+  endpoints: ApiEndpoint[],
+  issues: QualityIssue[]
+): GeneratedTestCase[] => {
+  const endpointById = new Map(endpoints.map((endpoint) => [endpoint.id, endpoint]));
+  const issuesByEndpoint = new Map<string, QualityIssue[]>();
+  for (const issue of issues) {
+    if (!issue.endpointId) {
+      continue;
+    }
+    const existing = issuesByEndpoint.get(issue.endpointId) ?? [];
+    existing.push(issue);
+    issuesByEndpoint.set(issue.endpointId, existing);
+  }
+
+  const merged = new Map<string, GeneratedTestCase>();
+  const previousByKey = new Map(previousTests.map((test) => [repairTestKey(test), test]));
+  const repairedByKey = new Map(repairedTests.map((test) => [repairTestKey(test), test]));
+
+  for (const [key, previous] of previousByKey.entries()) {
+    const endpoint = endpointById.get(previous.endpointId);
+    const candidate = repairedByKey.get(key);
+    if (endpoint && candidate && isSafeRepairReplacement(endpoint, previous, candidate, issuesByEndpoint.get(previous.endpointId) ?? [])) {
+      merged.set(key, candidate);
+    } else {
+      merged.set(key, previous);
+    }
+  }
+
+  for (const [key, candidate] of repairedByKey.entries()) {
+    if (!merged.has(key)) {
+      merged.set(key, candidate);
+    }
+  }
+
+  return [...merged.values()];
+};
+
 export const assessGeneratedTestQuality = (
   endpoints: ApiEndpoint[],
   tests: GeneratedTestCase[],
@@ -241,11 +404,32 @@ export const assessGeneratedTestQuality = (
           test.category
         ));
       }
+
+      const documentedResponse = defaultResponseForStatus(endpoint, test.expected.status);
+      if (test.category === 'positive' && documentedResponse?.schema && !test.expected.jsonSchema) {
+        issues.push(createIssue(
+          'schema-assertion',
+          'error',
+          `Missing schema assertion for ${endpoint.method} ${endpoint.path}`,
+          endpoint.id,
+          test.category
+        ));
+      }
+
+      if (!test.expected.contractChecks?.length) {
+        issues.push(createIssue(
+          'contract-assertion',
+          'warn',
+          `Missing contract assertions for ${endpoint.method} ${endpoint.path}`,
+          endpoint.id,
+          test.category
+        ));
+      }
     }
   }
 
   return {
-    passed: issues.length === 0,
+    passed: !issues.some((issue) => issue.severity === 'error'),
     issues
   };
 };
@@ -263,7 +447,7 @@ export class BatchGenerationError extends Error {
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const generateBatchWithRepair = async (
-  providerAdapter: ReturnType<typeof getProviderAdapter>,
+  providerAdapter: Awaited<ReturnType<typeof loadProviderAdapter>>,
   batch: ApiEndpoint[],
   context: GenerateContext,
   options: Pick<GenerateOptions, 'settings' | 'signal' | 'onBatchHeartbeat'> & { batchIndex: number; totalBatches: number; generatedTests: GeneratedTestCase[] }
@@ -324,10 +508,11 @@ const generateBatchWithRepair = async (
     });
 
     const repairedNormalized = normalizeGeneratedTests(repaired.tests, options.settings.includeCategories, batch);
-    const repairedQuality = assessGeneratedTestQuality(batch, repairedNormalized, options.settings.includeCategories);
+    const constrainedRepair = mergeSafeRepairs(normalized, repairedNormalized, batch, quality.issues);
+    const repairedQuality = assessGeneratedTestQuality(batch, constrainedRepair, options.settings.includeCategories);
 
-    if (repairedQuality.passed || (repairedNormalized.length >= normalized.length && repairedQuality.issues.length <= quality.issues.length)) {
-      normalized = repairedNormalized;
+    if (repairedQuality.passed || (constrainedRepair.length >= normalized.length && repairedQuality.issues.length <= quality.issues.length)) {
+      normalized = constrainedRepair;
       quality = repairedQuality;
     }
   }
@@ -373,15 +558,25 @@ export const normalizeGeneratedTests = (
       const request = (source.request as Record<string, unknown> | undefined) ?? {};
       const expected = (source.expected as Record<string, unknown> | undefined) ?? {};
       const headers = normalizeHeaders(request.headers);
+      const defaultHeaders = defaultAuthHeadersForEndpoint(endpoint);
 
-      if (endpoint.auth === 'bearer' && !('Authorization' in headers) && !('authorization' in headers)) {
-        headers.Authorization = 'Bearer {{API_TOKEN}}';
+      for (const [headerName, headerValue] of Object.entries(defaultHeaders)) {
+        if (!(headerName in headers) && !(headerName.toLowerCase() in headers)) {
+          headers[headerName] = headerValue;
+        }
       }
+
+      const status = Number.isFinite(Number(expected.status)) ? Number(expected.status) : defaultExpectedStatus(endpoint);
+      const documentedResponse = defaultResponseForStatus(endpoint, status);
+      const trustScore = Math.max(1, Math.min(99, Math.round((endpoint.trustScore ?? Math.round((endpoint.confidence ?? 0.5) * 100)) - (String(source.title ?? '').toLowerCase().includes('generated') ? 12 : 0))));
 
       const normalized: GeneratedTestCase = {
         endpointId: endpoint.id,
         category: allowedCategories.includes(category) ? (category as GeneratedTestCase['category']) : 'positive',
         title: String(source.title ?? `${endpoint.method} ${endpoint.path} generated test`),
+        rationale: typeof source.rationale === 'string' ? source.rationale : endpoint.summary ?? endpoint.description,
+        trustScore,
+        trustLabel: inferredTrustLabel(trustScore),
         request: {
           method: endpoint.method,
           path: normalizeRequestPath(request.path, endpoint),
@@ -390,12 +585,28 @@ export const normalizeGeneratedTests = (
           body: request.body
         },
         expected: {
-          status: Number.isFinite(Number(expected.status)) ? Number(expected.status) : defaultExpectedStatus(endpoint),
+          status,
           contains: Array.isArray(expected.contains)
             ? (expected.contains as string[])
                 .map((value) => String(value))
                 .filter(Boolean)
-            : []
+            : [],
+          contentType: typeof expected.contentType === 'string'
+            ? expected.contentType
+            : documentedResponse?.contentType,
+          responseHeaders: normalizeResponseHeaders(expected.responseHeaders),
+          jsonSchema: isRecord(expected.jsonSchema)
+            ? (expected.jsonSchema as unknown as GeneratedTestCase['expected']['jsonSchema'])
+            : (category === 'positive' ? documentedResponse?.schema : undefined),
+          contractChecks: Array.isArray(expected.contractChecks)
+            ? expected.contractChecks.map((value) => String(value))
+            : defaultContractChecks(endpoint, allowedCategories.includes(category) ? (category as GeneratedTestCase['category']) : 'positive'),
+          pagination: typeof expected.pagination === 'boolean'
+            ? expected.pagination
+            : isLikelyPaginatedEndpoint(endpoint),
+          idempotent: typeof expected.idempotent === 'boolean'
+            ? expected.idempotent
+            : ['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'].includes(endpoint.method)
         }
       };
 
@@ -427,14 +638,22 @@ export const renderGeneratedFiles = (
   settings: ExtensionSettings,
   repo: RepoRef,
   endpointCount: number,
-  tests: GeneratedTestCase[]
+  tests: GeneratedTestCase[],
+  options?: {
+    readiness?: ProjectMeta['readiness'];
+    readinessNotes?: ProjectMeta['readinessNotes'];
+    validationSummary?: ProjectMeta['validationSummary'];
+  }
 ): GeneratedFile[] => {
   const frameworkAdapter = getFrameworkAdapter(settings.framework);
   const projectMeta = {
     repo,
     generatedAt: new Date().toISOString(),
     framework: settings.framework,
-    endpointCount
+    endpointCount,
+    readiness: options?.readiness,
+    readinessNotes: options?.readinessNotes,
+    validationSummary: options?.validationSummary
   };
 
   const files = frameworkAdapter.render(tests, projectMeta);
@@ -446,10 +665,128 @@ export const renderGeneratedFiles = (
 
   files.push({
     path: '.env.example',
-    content: 'API_TOKEN=your_token_here\nAPI_BASE_URL=http://localhost:3000\n'
+    content: [
+      'API_BASE_URL=http://localhost:3000',
+      'API_TOKEN=your_token_here',
+      'API_KEY=your_api_key_here',
+      'CSRF_TOKEN=your_csrf_token_here',
+      'SESSION_COOKIE=your_session_cookie_here'
+    ].join('\n') + '\n'
+  });
+
+  files.push({
+    path: 'validation-report.json',
+    content: JSON.stringify(
+      {
+        generatedAt: projectMeta.generatedAt,
+        repo: `${repo.owner}/${repo.repo}`,
+        framework: settings.framework,
+        readiness: projectMeta.readiness ?? 'review_required',
+        readinessNotes: projectMeta.readinessNotes ?? [],
+        validationSummary: projectMeta.validationSummary ?? null,
+        testCount: tests.length
+      },
+      null,
+      2
+    )
   });
 
   return files;
+};
+
+const validationFailuresToIssues = (summary: ValidationSummary, endpointId: string): QualityIssue[] => {
+  const endpointResults = summary.results.filter((result) => result.endpointId === endpointId && !result.success);
+  return endpointResults.flatMap((result) =>
+    result.failures.map((failure) =>
+      createIssue(
+        failure.type === 'auth'
+          ? 'execution-auth'
+          : failure.type === 'status'
+            ? 'execution-status'
+            : 'execution-body',
+        'error',
+        `${result.title}: ${failure.message}`,
+        endpointId
+      )
+    )
+  );
+};
+
+export const repairTestsFromValidation = async (options: {
+  settings: ExtensionSettings;
+  repo: RepoRef;
+  endpoints: ApiEndpoint[];
+  tests: GeneratedTestCase[];
+  validationSummary: ValidationSummary;
+  signal?: AbortSignal;
+}): Promise<GeneratedTestCase[]> => {
+  const failingEndpointIds = [...new Set(options.validationSummary.results.filter((result) => !result.success).map((result) => result.endpointId))];
+  if (!failingEndpointIds.length) {
+    return options.tests;
+  }
+
+  const context: GenerateContext = {
+    repo: options.repo,
+    framework: options.settings.framework,
+    includeCategories: options.settings.includeCategories,
+    timeoutMs: options.settings.timeoutMs,
+    customPromptInstructions: options.settings.customPromptInstructions,
+    baseUrl: options.settings.baseUrl
+  };
+
+  const chunks = chunkArray(
+    options.endpoints.filter((endpoint) => failingEndpointIds.includes(endpoint.id)),
+    options.settings.batchSize
+  );
+  const stableTests = options.tests.filter((test) => !failingEndpointIds.includes(test.endpointId));
+  const repairedTests: GeneratedTestCase[] = [];
+  const allProviders: Array<ExtensionSettings['provider']> = ['openai', 'claude', 'gemini'];
+  const providersToTry = options.settings.enableProviderFallback
+    ? [options.settings.provider, ...allProviders.filter((provider) => provider !== options.settings.provider)]
+    : [options.settings.provider];
+
+  for (const batch of chunks) {
+    const endpointIds = new Set(batch.map((endpoint) => endpoint.id));
+    const currentTests = options.tests.filter((test) => endpointIds.has(test.endpointId));
+    const repairIssues = batch.flatMap((endpoint) => validationFailuresToIssues(options.validationSummary, endpoint.id));
+    let repairedBatch: GeneratedTestCase[] | null = null;
+
+    for (const provider of providersToTry) {
+      const apiKey = getProviderKey(options.settings, provider);
+      if (!apiKey) {
+        continue;
+      }
+
+      try {
+        const adapter = await loadProviderAdapter(provider);
+        const generated = await adapter.generateTests(batch, context, {
+          apiKey,
+          model: options.settings.model,
+          signal: options.signal,
+          timeoutMs: options.settings.timeoutMs,
+          hardTimeoutMs: options.settings.timeoutMs * 2,
+          promptMode: 'repair',
+          currentTests,
+          repairIssues
+        });
+        repairedBatch = mergeSafeRepairs(
+          currentTests,
+          normalizeGeneratedTests(generated.tests, options.settings.includeCategories, batch),
+          batch,
+          repairIssues
+        );
+        if (repairedBatch.length) {
+          break;
+        }
+      } catch (error) {
+        console.warn('[APItiser] Validation repair failed for batch.', error);
+      }
+    }
+
+    repairedTests.push(...(repairedBatch?.length ? repairedBatch : currentTests));
+  }
+
+  return [...stableTests, ...repairedTests];
 };
 
 export const generateTestSuite = async (options: GenerateOptions): Promise<GenerationResult> => {
@@ -458,7 +795,8 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
     framework: options.settings.framework,
     includeCategories: options.settings.includeCategories,
     timeoutMs: options.settings.timeoutMs,
-    customPromptInstructions: options.settings.customPromptInstructions
+    customPromptInstructions: options.settings.customPromptInstructions,
+    baseUrl: options.settings.baseUrl
   };
 
   const chunks = chunkArray(options.endpoints, options.settings.batchSize);
@@ -483,7 +821,7 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
         continue;
       }
       try {
-        const adapter = getProviderAdapter(provider);
+        const adapter = await loadProviderAdapter(provider);
         result = await generateBatchWithRepair(adapter, batch, context, {
           ...options,
           batchIndex: index,

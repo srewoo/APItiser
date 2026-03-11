@@ -167,6 +167,18 @@ export async function updateSettings(patch: Partial<ExtensionSettings>, contextI
   if (typeof normalizedPatch.openApiFallbackSpec === 'string') {
     normalizedPatch.openApiFallbackSpec = normalizedPatch.openApiFallbackSpec.trim();
   }
+  if (normalizedPatch.runtimeSetupSteps && Array.isArray(normalizedPatch.runtimeSetupSteps)) {
+    normalizedPatch.runtimeSetupSteps = normalizedPatch.runtimeSetupSteps
+      .filter((step): step is NonNullable<ExtensionSettings['runtimeSetupSteps']>[number] => Boolean(step && typeof step === 'object'))
+      .map((step) => ({
+        ...step,
+        id: String(step.id ?? '').trim(),
+        name: String(step.name ?? '').trim(),
+        method: String(step.method ?? 'GET').toUpperCase(),
+        path: String(step.path ?? '').trim()
+      }))
+      .filter((step) => Boolean(step.id && step.name && step.path));
+  }
 
   store.settings = {
     ...store.settings,

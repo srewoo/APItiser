@@ -1,10 +1,15 @@
-import JSZip from 'jszip';
-import type { GeneratedArtifact, GeneratedFile, TestFramework } from '@shared/types';
+import type { GeneratedArtifact, GeneratedFile, ReadinessState, TestFramework, ValidationSummary } from '@shared/types';
 import { createId } from '@background/utils/id';
+import JSZip from 'jszip';
 
 export const buildArtifactZip = async (
   framework: TestFramework,
-  files: GeneratedFile[]
+  files: GeneratedFile[],
+  options?: {
+    readiness?: ReadinessState;
+    readinessNotes?: string[];
+    validationSummary?: ValidationSummary;
+  }
 ): Promise<GeneratedArtifact> => {
   const zip = new JSZip();
 
@@ -17,9 +22,12 @@ export const buildArtifactZip = async (
   return {
     id: createId('artifact'),
     createdAt: Date.now(),
-    fileName: 'api-tests.zip',
+    fileName: options?.readiness ? `api-tests-${options.readiness}.zip` : 'api-tests.zip',
     framework,
     files,
-    zipBase64
+    zipBase64,
+    readiness: options?.readiness,
+    readinessNotes: options?.readinessNotes,
+    validationSummary: options?.validationSummary
   };
 };

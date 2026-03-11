@@ -40,6 +40,7 @@ export const fetchGitLabRepoFiles = async (repo: RepoRef, token?: string, signal
   const ref = repo.branch ?? 'HEAD';
 
   const treeUrl = new URL(`${baseUrl}/api/v4/projects/${projectId}/repository/tree`);
+  treeUrl.searchParams.set('ref', ref);
   treeUrl.searchParams.set('recursive', 'true');
   treeUrl.searchParams.set('per_page', '100');
   if (repo.path) {

@@ -5,7 +5,7 @@ const toEndpointId = (method: string, path: string): string => `${method.toUpper
 const normalizeSegment = (value: string): string => value.replace(/^\/+|\/+$/g, '');
 
 export const normalizePath = (value: string): string => {
-  const trimmed = value.trim();
+  const trimmed = value.trim().replace(/\{([A-Za-z0-9_]+)\}/g, ':$1');
   if (!trimmed) {
     return '/';
   }
@@ -90,6 +90,10 @@ export const buildEndpoint = (params: {
   queryParams?: ApiEndpoint['queryParams'];
   body?: ApiEndpoint['body'];
   responses?: ApiEndpoint['responses'];
+  authHints?: ApiEndpoint['authHints'];
+  examples?: ApiEndpoint['examples'];
+  sourceMetadata?: ApiEndpoint['sourceMetadata'];
+  tags?: ApiEndpoint['tags'];
 }): ApiEndpoint => {
   const method = params.method.toUpperCase();
   const path = normalizePath(params.path);
@@ -108,6 +112,10 @@ export const buildEndpoint = (params: {
     pathParams: params.pathParams ?? extractPathParams(path),
     queryParams: params.queryParams ?? [],
     body: params.body,
-    responses: params.responses ?? [{ status: '200' }, { status: '400' }, { status: '401' }]
+    responses: params.responses ?? [{ status: '200' }, { status: '400' }, { status: '401' }],
+    authHints: params.authHints,
+    examples: params.examples,
+    sourceMetadata: params.sourceMetadata,
+    tags: params.tags
   };
 };

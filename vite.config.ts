@@ -14,6 +14,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    modulePreload: false,
+    chunkSizeWarningLimit: 1000,
     rollupOptions: {
       input: {
         popup: resolve(__dirname, 'popup.html'),
@@ -26,7 +28,16 @@ export default defineConfig({
         entryFileNames: (chunkInfo) =>
           chunkInfo.name === 'service-worker' ? 'service-worker.js' : 'assets/[name].js',
         chunkFileNames: 'assets/chunk-[name].js',
-        assetFileNames: 'assets/[name][extname]'
+        assetFileNames: 'assets/[name][extname]',
+        manualChunks: (id) => {
+          if (id.includes('node_modules/jszip')) return 'vendor-jszip';
+          if (id.includes('node_modules')) return 'vendor';
+          if (id.includes('/src/background/parser/')) return 'bg-parser';
+          if (id.includes('/src/background/generation/')) return 'bg-generation';
+          if (id.includes('/src/background/llm/')) return 'bg-llm';
+          if (id.includes('/src/background/repo/')) return 'bg-repo';
+          return undefined;
+        }
       }
     }
   }

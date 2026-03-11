@@ -1,40 +1,23 @@
 import type { ApiEndpoint, RepoFile } from '@shared/types';
 import { parseCodeRoutes } from './codeRouteParser';
 import { parseOpenApiSpecs } from './openApiParser';
+import { canonicalizeEndpoints } from './canonicalize';
 
 export const parseApiMap = (files: RepoFile[]): ApiEndpoint[] => {
-  const codeEndpoints = parseCodeRoutes(files);
-  const openApiEndpoints = parseOpenApiSpecs(files);
+  let codeEndpoints: ApiEndpoint[] = [];
+  let openApiEndpoints: ApiEndpoint[] = [];
 
-  const merged = [...openApiEndpoints, ...codeEndpoints];
-  const deduped = new Map<string, ApiEndpoint>();
-
-  for (const endpoint of merged) {
-    const key = `${endpoint.method}:${endpoint.path}`;
-    const current = deduped.get(key);
-    if (!current) {
-      deduped.set(key, endpoint);
-      continue;
-    }
-
-    if (endpoint.source === 'openapi' && current.source !== 'openapi') {
-      deduped.set(key, endpoint);
-      continue;
-    }
-
-    if (current.source === 'openapi' && endpoint.source !== 'openapi') {
-      continue;
-    }
-
-    if ((endpoint.confidence ?? 0) > (current.confidence ?? 0)) {
-      deduped.set(key, endpoint);
-    }
+  try {
+    codeEndpoints = parseCodeRoutes(files);
+  } catch (error) {
+    console.warn('[APItiser] Code route parsing failed during scan.', error);
   }
 
-  return [...deduped.values()].sort((a, b) => {
-    if (a.path === b.path) {
-      return a.method.localeCompare(b.method);
-    }
-    return a.path.localeCompare(b.path);
-  });
+  try {
+    openApiEndpoints = parseOpenApiSpecs(files);
+  } catch (error) {
+    console.warn('[APItiser] OpenAPI parsing failed during scan.', error);
+  }
+
+  return canonicalizeEndpoints([...openApiEndpoints, ...codeEndpoints], files);
 };

@@ -8,6 +8,31 @@ const toPyObject = (value: unknown): string => {
     .replace(/\bnull\b/g, 'None');
 };
 
+const toPyHeaderValue = (value: string): string =>
+  value === 'Bearer {{API_TOKEN}}'
+    ? `f"Bearer {os.getenv('API_TOKEN', 'replace-me')}"`
+    : value === '{{API_KEY}}'
+      ? `os.getenv('API_KEY', 'replace-me')`
+      : value === '{{CSRF_TOKEN}}'
+        ? `os.getenv('CSRF_TOKEN', 'replace-me')`
+    : JSON.stringify(value);
+
+const toPyHeaders = (headers: Record<string, string>): string => {
+  const entries = Object.entries(headers);
+  if (!entries.length) {
+    return '{}';
+  }
+
+  return `{
+        ${entries.map(([key, value]) => `${JSON.stringify(key)}: ${toPyHeaderValue(value)}`).join(',\n        ')}
+    }`;
+};
+
+const toPyList = (value: unknown): string => JSON.stringify(value ?? [], null, 2)
+  .replace(/\btrue\b/g, 'True')
+  .replace(/\bfalse\b/g, 'False')
+  .replace(/\bnull\b/g, 'None');
+
 export class PytestFrameworkAdapter implements TestFrameworkAdapter {
   readonly framework = 'pytest' as const;
 
@@ -29,21 +54,47 @@ export class PytestFrameworkAdapter implements TestFrameworkAdapter {
       const fnBlocks = cases
         .map((testCase, index) => {
           const fnName = `test_${groupKey}_${index + 1}`;
+          const responseHeaders = toPyObject(testCase.expected.responseHeaders ?? {});
+          const jsonSchema = toPyObject(testCase.expected.jsonSchema ?? null);
+          const contractChecks = toPyList(testCase.expected.contractChecks ?? []);
           const contains = testCase.expected.contains?.length
             ? testCase.expected.contains.map((value) => `    assert ${JSON.stringify(value)} in response.text`).join('\n')
             : '    # No content assertions provided';
+          const contentType = testCase.expected.contentType
+            ? `    assert ${JSON.stringify(testCase.expected.contentType)} in (response.headers.get('Content-Type') or '')`
+            : '    # No content-type assertions provided';
+          const headerChecks = Object.keys(testCase.expected.responseHeaders ?? {}).length
+            ? `    for key, value in ${responseHeaders}.items():\n        assert response.headers.get(key) == value`
+            : '    # No response-header assertions provided';
+          const schemaChecks = testCase.expected.jsonSchema
+            ? `    assert_schema_shape(${jsonSchema}, safe_json(response), 'response')`
+            : '    # No schema assertions provided';
+          const paginationCheck = testCase.expected.pagination
+            ? `    assert is_paginated_shape(safe_json(response))`
+            : '    # Pagination not asserted';
+          const idempotencyCheck = testCase.expected.idempotent
+            ? `    repeat = requests.request(\n        method=${JSON.stringify(testCase.request.method)},\n        url=f"{BASE_URL}${testCase.request.path}",\n        headers=${toPyHeaders(testCase.request.headers ?? {})},\n        params=${toPyObject(testCase.request.query ?? {})},\n        json=${toPyObject(testCase.request.body ?? null)}\n    )\n    assert repeat.status_code < 500`
+            : '    # Idempotency not asserted';
 
           return `def ${fnName}():
     # ${testCase.category} coverage
+    # Trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
     response = requests.request(
         method=${JSON.stringify(testCase.request.method)},
         url=f"{BASE_URL}${testCase.request.path}",
-        headers=${toPyObject(testCase.request.headers ?? {})},
+        headers=${toPyHeaders(testCase.request.headers ?? {})},
         params=${toPyObject(testCase.request.query ?? {})},
         json=${toPyObject(testCase.request.body ?? null)}
     )
     assert response.status_code == ${testCase.expected.status}
 ${contains}
+${contentType}
+${headerChecks}
+${schemaChecks}
+    for contract_check in ${contractChecks}:
+        assert isinstance(contract_check, str)
+${paginationCheck}
+${idempotencyCheck}
 `;
         })
         .join('\n');
@@ -61,6 +112,45 @@ import requests
 
 BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:3000')
 
+def safe_json(response):
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+def is_paginated_shape(value):
+    return isinstance(value, list) or (isinstance(value, dict) and any(key in value for key in ('items', 'results', 'data')))
+
+def assert_schema_shape(schema, value, path='response'):
+    if not schema:
+        return
+    schema_type = schema.get('type')
+    if schema_type == 'array':
+        assert isinstance(value, list)
+        if schema.get('items') and value:
+            assert_schema_shape(schema['items'], value[0], ${"`f'{path}[0]'`"})
+        return
+    if schema_type == 'object':
+        assert isinstance(value, dict)
+        for key in schema.get('required', []):
+            assert key in value
+        for key, child in (schema.get('properties') or {}).items():
+            if key in value:
+                assert_schema_shape(child, value[key], ${"`f'{path}.{key}'`"})
+        return
+    if schema_type == 'integer':
+        assert isinstance(value, int) and not isinstance(value, bool)
+        return
+    if schema_type == 'number':
+        assert isinstance(value, (int, float)) and not isinstance(value, bool)
+        return
+    if schema_type == 'boolean':
+        assert isinstance(value, bool)
+        return
+    if schema_type == 'string':
+        assert isinstance(value, str)
+        return
+
 ${fnBlocks}
 `
       };
@@ -68,6 +158,12 @@ ${fnBlocks}
   }
 
   renderReadme(projectMeta: ProjectMeta): GeneratedFile {
+    const validationLine = projectMeta.validationSummary
+      ? `Validation: ${projectMeta.validationSummary.passed}/${projectMeta.validationSummary.attempted} passed`
+      : 'Validation: not run';
+    const readinessNotes = projectMeta.readinessNotes?.length
+      ? `\n## Readiness Notes\n\n${projectMeta.readinessNotes.map((note) => `- ${note}`).join('\n')}\n`
+      : '';
     return {
       path: 'README.md',
       content: `# APItiser Generated Pytest Suite
@@ -75,6 +171,8 @@ ${fnBlocks}
 Generated at: ${projectMeta.generatedAt}
 Repository: ${projectMeta.repo.owner}/${projectMeta.repo.repo}
 Endpoints: ${projectMeta.endpointCount}
+Readiness: ${projectMeta.readiness ?? 'review_required'}
+${validationLine}
 
 ## Run
 
@@ -83,7 +181,7 @@ pip install requests pytest
 export API_TOKEN=replace-me
 API_BASE_URL=http://localhost:3000 pytest tests
 \`\`\`
-`
+${readinessNotes}`
     };
   }
 

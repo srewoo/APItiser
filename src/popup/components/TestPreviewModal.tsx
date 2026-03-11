@@ -26,6 +26,18 @@ const formatRequest = (test: GeneratedTestCase, endpoint: ApiEndpoint): string =
   if (test.expected.contains?.length) {
     lines.push(`# Expected Contains: ${test.expected.contains.join(', ')}`);
   }
+  if (test.expected.contractChecks?.length) {
+    lines.push(`# Contract Checks: ${test.expected.contractChecks.join(', ')}`);
+  }
+  if (test.expected.pagination) {
+    lines.push(`# Pagination: true`);
+  }
+  if (test.expected.idempotent) {
+    lines.push(`# Idempotent: true`);
+  }
+  if (test.trustLabel) {
+    lines.push(`# Trust: ${test.trustLabel} (${test.trustScore ?? 0})`);
+  }
   lines.push(`# Endpoint: ${endpoint.method} ${endpoint.path}`);
 
   return lines.join('\n');
@@ -92,6 +104,9 @@ export function TestPreviewModal({ tests, endpoints, onClose }: TestPreviewModal
                       <div className="preview-card-header">
                         <span className="preview-title">{test.title}</span>
                         <span className={`chip active category-chip-${test.category}`}>{test.category}</span>
+                        {test.trustLabel ? (
+                          <span className="chip">{test.trustLabel}</span>
+                        ) : null}
                         <button
                           type="button"
                           className="ghost copy-btn"

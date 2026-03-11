@@ -5,7 +5,7 @@
 
 export const MAX_FILES = 1200;
 
-export const ALLOWED_EXTENSIONS = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.py'];
+export const ALLOWED_EXTENSIONS = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.py', '.go', '.java'];
 
 export const EXCLUDED_SEGMENTS = new Set([
   'node_modules',
@@ -52,7 +52,7 @@ export const rankPath = (path: string): number => {
   if (/(^|\/)(tests?|__tests__)(\/|$)/i.test(lower)) {
     score += 10;
   }
-  if (/\.(ts|tsx|js|jsx|mjs|cjs|py)$/i.test(lower)) {
+  if (/\.(ts|tsx|js|jsx|mjs|cjs|py|go|java)$/i.test(lower)) {
     score += 10;
   }
 

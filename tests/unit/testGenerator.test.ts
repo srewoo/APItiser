@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BatchGenerationError, assessGeneratedTestQuality, generateTestSuite, normalizeGeneratedTests } from '@background/generation/testGenerator';
+import { assessGeneratedTestQuality, generateTestSuite, normalizeGeneratedTests, repairTestsFromValidation } from '@background/generation/testGenerator';
 import type { ApiEndpoint, ExtensionSettings, GeneratedTestCase, GenerateContext, ProviderOptions } from '@shared/types';
 
 const generateTestsMock = vi.fn<
@@ -7,7 +7,7 @@ const generateTestsMock = vi.fn<
 >();
 
 vi.mock('@background/llm/client', () => ({
-  getProviderAdapter: () => ({
+  loadProviderAdapter: async () => ({
     provider: 'openai',
     generateTests: generateTestsMock
   })
@@ -256,6 +256,95 @@ describe('normalizeGeneratedTests', () => {
         repairAttempted: true
       })
     }));
+  });
+
+  it('preserves stronger assertions when validation repair returns a weaker replacement', async () => {
+    const endpoints: ApiEndpoint[] = [
+      {
+        id: 'GET::/users/:id',
+        method: 'GET',
+        path: '/users/:id',
+        source: 'openapi',
+        auth: 'bearer',
+        pathParams: [{ name: 'id', required: true, type: 'integer' }],
+        queryParams: [],
+        responses: [{
+          status: '200',
+          contentType: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['id'],
+            properties: {
+              id: { name: 'id', required: true, type: 'integer' }
+            }
+          }
+        }]
+      }
+    ];
+
+    const currentTests: GeneratedTestCase[] = [
+      {
+        endpointId: 'GET::/users/:id',
+        category: 'positive',
+        title: 'gets user by id',
+        request: {
+          method: 'GET',
+          path: '/users/1',
+          headers: { Authorization: 'Bearer {{API_TOKEN}}' }
+        },
+        expected: {
+          status: 200,
+          contentType: 'application/json',
+          jsonSchema: endpoints[0].responses[0].schema,
+          contractChecks: ['response matches documented schema']
+        }
+      }
+    ];
+
+    generateTestsMock.mockResolvedValueOnce({
+      tests: [
+        {
+          endpointId: 'GET::/users/:id',
+          category: 'positive',
+          title: 'gets user after repair',
+          request: {
+            method: 'GET',
+            path: '/users/1'
+          },
+          expected: {
+            status: 200
+          }
+        }
+      ]
+    });
+
+    const repaired = await repairTestsFromValidation({
+      settings: baseSettings,
+      repo: { platform: 'github', owner: 'acme', repo: 'demo' },
+      endpoints,
+      tests: currentTests,
+      validationSummary: {
+        attempted: 1,
+        passed: 0,
+        failed: 1,
+        repaired: 0,
+        skipped: 0,
+        lastValidatedAt: Date.now(),
+        results: [
+          {
+            endpointId: 'GET::/users/:id',
+            title: 'gets user by id',
+            success: false,
+            durationMs: 10,
+            failures: [{ type: 'status', message: 'Expected HTTP 200 but received 500.' }]
+          }
+        ]
+      }
+    });
+
+    expect(repaired[0].expected.contentType).toBe('application/json');
+    expect(repaired[0].expected.jsonSchema).toBeDefined();
+    expect(repaired[0].request.headers?.Authorization).toBe('Bearer {{API_TOKEN}}');
   });
 });
 
