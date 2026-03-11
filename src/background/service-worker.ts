@@ -9,6 +9,7 @@ import { scanRepositoryFiles } from './repo/scanner';
 import { validateRepoAccess } from './repo/validator';
 import { buildCoverage } from './generation/coverage';
 import { buildArtifactZip } from './generation/zipBuilder';
+import { buildPostmanCollection } from './generation/postmanExport';
 import { applyGenerationProgressToJob, BatchGenerationError, generateTestSuite, renderGeneratedFiles } from './generation/testGenerator';
 import { clearBadge, updateBadgeForJob } from './core/badge';
 import {
@@ -29,6 +30,7 @@ import { registerKeepAliveListener, startKeepAlive, stopKeepAlive } from './core
 import { createId } from './utils/id';
 
 let activeAbortController: AbortController | null = null;
+let scanAbortController: AbortController | null = null;
 let generationInFlight = false;
 let scanInFlight = false;
 let autoResumeStarted = false;
@@ -364,13 +366,15 @@ const runScanPipeline = async (
   state: AppState,
   repo: RepoRef,
   contextId: string,
-  options?: { resumeFromJob?: JobState }
+  options?: { resumeFromJob?: JobState; signal?: AbortSignal }
 ): Promise<AppState> => {
   if (scanInFlight) {
     throw new Error('Scan is already in progress.');
   }
 
   scanInFlight = true;
+  scanAbortController = new AbortController();
+  const scanSignal = options?.signal ?? scanAbortController.signal;
   clearedContexts.delete(contextId);
   await startKeepAlive();
 
@@ -416,10 +420,11 @@ const runScanPipeline = async (
   try {
     const files = await scanRepositoryFiles(repo, {
       githubToken: state.settings.githubToken,
-      gitlabToken: state.settings.gitlabToken
+      gitlabToken: state.settings.gitlabToken,
+      signal: scanSignal
     });
 
-    if (isContextCleared(contextId)) {
+    if (isContextCleared(contextId) || scanSignal.aborted) {
       await stopKeepAlive();
       return await loadState(contextId);
     }
@@ -448,7 +453,7 @@ const runScanPipeline = async (
       state.settings.includeCategories
     );
 
-    if (isContextCleared(contextId)) {
+    if (isContextCleared(contextId) || scanSignal.aborted) {
       await stopKeepAlive();
       return await loadState(contextId);
     }
@@ -489,6 +494,7 @@ const runScanPipeline = async (
     }
     return await completeWithError(scanningJob, error, state.settings.framework, contextId);
   } finally {
+    scanAbortController = null;
     scanInFlight = false;
   }
 };
@@ -560,6 +566,8 @@ const handleStartGeneration = async (
 const handleCancel = async (contextId: string): Promise<AppState> => {
   activeAbortController?.abort();
   activeAbortController = null;
+  scanAbortController?.abort();
+  scanAbortController = null;
 
   const state = await loadState(contextId);
   if (!state.activeJob) {
@@ -588,6 +596,29 @@ const handleDownload = async (artifactId: string, contextId: string): Promise<Ev
   };
 };
 
+const handleExportPostman = async (contextId: string): Promise<EventMessage> => {
+  const state = await loadState(contextId);
+  const repo = state.activeJob?.repo ?? state.jobHistory[0]?.repo;
+  const tests = state.activeJob?.generatedTests ?? state.jobHistory[0]?.generatedTests ?? [];
+  const endpoints = state.activeJob?.endpoints ?? state.jobHistory[0]?.endpoints ?? [];
+
+  if (!repo || !tests.length || !endpoints.length) {
+    throw new Error('No generated tests available to export');
+  }
+
+  const baseUrl = state.settings.baseUrl || 'http://localhost:3000';
+  const collection = buildPostmanCollection(repo, tests, endpoints, baseUrl);
+  const base64 = btoa(unescape(encodeURIComponent(collection)));
+
+  await chrome.downloads.download({
+    filename: `APItiser_${repo.repo}_Postman.json`,
+    saveAs: true,
+    url: `data:application/json;base64,${base64}`
+  });
+
+  return { type: 'ACK', contextId } as EventMessage;
+};
+
 const handleValidateRepoAccess = async (
   command: Extract<CommandMessage, { type: 'VALIDATE_REPO_ACCESS' }>
 ): Promise<AppState> => {
@@ -607,6 +638,8 @@ const handleClearContext = async (contextId: string): Promise<AppState> => {
   clearedContexts.add(contextId);
   activeAbortController?.abort();
   activeAbortController = null;
+  scanAbortController?.abort();
+  scanAbortController = null;
   await stopKeepAlive();
   const next = await clearContext(contextId);
   updateBadgeForJob(next.activeJob);
@@ -755,6 +788,11 @@ chrome.runtime.onMessage.addListener((message: CommandMessage, _sender, sendResp
 
       if (message.type === 'DOWNLOAD_ARTIFACT') {
         sendResponse(await handleDownload(message.payload.artifactId, contextId));
+        return;
+      }
+
+      if (message.type === 'EXPORT_POSTMAN') {
+        sendResponse(await handleExportPostman(contextId));
         return;
       }
 

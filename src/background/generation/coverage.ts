@@ -46,6 +46,6 @@ export const buildCoverage = (
     endpointsDetected: endpoints.length,
     testsGenerated: tests.length,
     coveragePercent,
-    gaps: gaps.slice(0, 20)
+    gaps
   };
 };

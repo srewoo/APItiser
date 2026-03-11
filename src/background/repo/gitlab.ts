@@ -1,63 +1,13 @@
 import type { RepoFile, RepoRef } from '@shared/types';
 import { withRetry } from '@background/utils/retry';
-
-const MAX_FILES = 1200;
-const ALLOWED_EXTENSIONS = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.py'];
-const EXCLUDED_SEGMENTS = new Set([
-  'node_modules',
-  'dist',
-  'build',
-  'coverage',
-  '.next',
-  '.nuxt',
-  '.turbo',
-  '.venv',
-  'venv',
-  '__pycache__'
-]);
+import { MAX_FILES, shouldExcludePath, sortCandidates, supportsPath } from './shared';
+import { checkGitLabRateLimit } from './rateLimit';
 
 interface GitLabTreeItem {
   id: string;
   path: string;
   type: 'blob' | 'tree';
 }
-
-const supportsPath = (path: string): boolean => ALLOWED_EXTENSIONS.some((extension) => path.endsWith(extension));
-const shouldExcludePath = (path: string): boolean => path.split('/').some((segment) => EXCLUDED_SEGMENTS.has(segment));
-const rankPath = (path: string): number => {
-  let score = 0;
-  const lower = path.toLowerCase();
-
-  if (/(^|\/)(openapi|swagger)[^/]*\.(json|ya?ml)$/i.test(lower)) {
-    score += 120;
-  }
-  if (/(^|\/)(routes?|controllers?|handlers?|endpoints?)(\/|$)/i.test(lower)) {
-    score += 80;
-  }
-  if (/(^|\/)(api|apis|server|backend|services?|app)(\/|$)/i.test(lower)) {
-    score += 50;
-  }
-  if (/(^|\/)(src|lib)(\/|$)/i.test(lower)) {
-    score += 20;
-  }
-  if (/(^|\/)(tests?|__tests__)(\/|$)/i.test(lower)) {
-    score += 10;
-  }
-  if (/\.(ts|tsx|js|jsx|mjs|cjs|py)$/i.test(lower)) {
-    score += 10;
-  }
-
-  return score;
-};
-
-const sortCandidates = <T extends { path: string }>(items: T[]): T[] =>
-  [...items].sort((left, right) => {
-    const scoreDiff = rankPath(right.path) - rankPath(left.path);
-    if (scoreDiff !== 0) {
-      return scoreDiff;
-    }
-    return left.path.localeCompare(right.path);
-  });
 
 const buildHeaders = (token?: string): HeadersInit => {
   if (!token) {
@@ -70,8 +20,9 @@ const buildHeaders = (token?: string): HeadersInit => {
 
 const normalizeBase = (value?: string): string => (value || 'https://gitlab.com').replace(/\/$/, '');
 
-const fetchTreePage = async (url: string, headers: HeadersInit): Promise<{ items: GitLabTreeItem[]; nextPage?: string | null }> => {
-  const response = await fetch(url, { headers });
+const fetchTreePage = async (url: string, headers: HeadersInit, signal?: AbortSignal): Promise<{ items: GitLabTreeItem[]; nextPage?: string | null }> => {
+  const response = await fetch(url, { headers, signal });
+  await checkGitLabRateLimit(response.headers);
   if (!response.ok) {
     throw new Error(`GitLab tree fetch failed: ${response.status}`);
   }
@@ -82,7 +33,7 @@ const fetchTreePage = async (url: string, headers: HeadersInit): Promise<{ items
   };
 };
 
-export const fetchGitLabRepoFiles = async (repo: RepoRef, token?: string): Promise<RepoFile[]> => {
+export const fetchGitLabRepoFiles = async (repo: RepoRef, token?: string, signal?: AbortSignal): Promise<RepoFile[]> => {
   const baseUrl = normalizeBase(repo.gitlabBaseUrl);
   const headers = buildHeaders(token);
   const projectId = encodeURIComponent(`${repo.owner}/${repo.repo}`);
@@ -100,34 +51,47 @@ export const fetchGitLabRepoFiles = async (repo: RepoRef, token?: string): Promi
 
   while (page) {
     treeUrl.searchParams.set('page', page);
-    const result = await withRetry(async () => await fetchTreePage(treeUrl.toString(), headers));
+    const result = await withRetry(async () => await fetchTreePage(treeUrl.toString(), headers, signal));
     tree.push(...result.items);
     page = result.nextPage || '';
   }
 
-  const candidates = sortCandidates(
+  const candidateFiles = sortCandidates(
     tree.filter((item) => item.type === 'blob' && supportsPath(item.path) && !shouldExcludePath(item.path))
   ).slice(0, MAX_FILES);
 
-  const files = await Promise.all(
-    candidates.map(async (item): Promise<RepoFile> => {
-      const fileUrl = `${baseUrl}/api/v4/projects/${projectId}/repository/files/${encodeURIComponent(item.path)}/raw?ref=${encodeURIComponent(ref)}`;
-      const content = await withRetry(async () => {
-        const response = await fetch(fileUrl, { headers });
-        if (!response.ok) {
-          throw new Error(`GitLab file fetch failed: ${response.status}`);
-        }
-        return await response.text();
-      });
+  const CONCURRENCY = 15;
+  const files: RepoFile[] = [];
 
-      return {
-        path: item.path,
-        sha: item.id,
-        content,
-        size: content.length
-      };
-    })
-  );
+  for (let i = 0; i < candidateFiles.length; i += CONCURRENCY) {
+    const batch = candidateFiles.slice(i, i + CONCURRENCY);
+    let lastResponseHeaders: Headers | null = null;
+    const batchResults = await Promise.all(
+      batch.map(async (item): Promise<RepoFile> => {
+        const fileUrl = `${baseUrl}/api/v4/projects/${projectId}/repository/files/${encodeURIComponent(item.path)}/raw?ref=${encodeURIComponent(ref)}`;
+        const content = await withRetry(async () => {
+          const response = await fetch(fileUrl, { headers, signal });
+          await checkGitLabRateLimit(response.headers); // Added rate limit check
+          if (!response.ok) {
+            throw new Error(`GitLab file fetch failed: ${response.status}`);
+          }
+          lastResponseHeaders = response.headers;
+          return response.text();
+        });
+
+        return {
+          path: item.path,
+          sha: item.id, // Kept sha and size for RepoFile type consistency
+          content,
+          size: content.length
+        };
+      })
+    );
+    if (lastResponseHeaders) {
+      await checkGitLabRateLimit(lastResponseHeaders); // Added rate limit check after batch
+    }
+    files.push(...batchResults);
+  }
 
   return files;
 };

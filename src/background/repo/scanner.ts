@@ -4,11 +4,11 @@ import { fetchGitLabRepoFiles } from './gitlab';
 
 export const scanRepositoryFiles = async (
   repo: RepoRef,
-  tokens: { githubToken?: string; gitlabToken?: string }
+  tokens: { githubToken?: string; gitlabToken?: string; signal?: AbortSignal }
 ): Promise<RepoFile[]> => {
   if (repo.platform === 'github') {
-    return fetchGitHubRepoFiles(repo, tokens.githubToken);
+    return fetchGitHubRepoFiles(repo, tokens.githubToken, tokens.signal);
   }
 
-  return fetchGitLabRepoFiles(repo, tokens.gitlabToken);
+  return fetchGitLabRepoFiles(repo, tokens.gitlabToken, tokens.signal);
 };

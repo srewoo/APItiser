@@ -15,12 +15,41 @@ const normalizeSchemaField = (name: string, source: Record<string, unknown>, req
   description: source.description ? String(source.description) : undefined
 });
 
-const parseSchema = (schema: unknown): SchemaObject | undefined => {
+/**
+ * Resolves a JSON Pointer `$ref` (local only, e.g. `#/components/schemas/Pet`)
+ * against the root document. Returns the referenced object or undefined if not found.
+ */
+const resolveRef = (ref: string, document: Record<string, unknown>): Record<string, unknown> | undefined => {
+  if (!ref.startsWith('#/')) {
+    return undefined;
+  }
+  const parts = ref.slice(2).split('/').map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
+  let current: unknown = document;
+  for (const part of parts) {
+    if (current == null || typeof current !== 'object') {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return typeof current === 'object' && current !== null ? (current as Record<string, unknown>) : undefined;
+};
+
+const parseSchema = (schema: unknown, document?: Record<string, unknown>): SchemaObject | undefined => {
   if (!schema || typeof schema !== 'object') {
     return undefined;
   }
 
   const source = schema as Record<string, unknown>;
+
+  // Resolve $ref if present and document is provided
+  if (typeof source.$ref === 'string' && document) {
+    const resolved = resolveRef(source.$ref, document);
+    if (resolved) {
+      return parseSchema(resolved, document);
+    }
+    return undefined;
+  }
+
   const parsed: SchemaObject = {
     type: String(source.type ?? 'object'),
     description: source.description ? String(source.description) : undefined
@@ -33,12 +62,12 @@ const parseSchema = (schema: unknown): SchemaObject | undefined => {
   if (source.properties && typeof source.properties === 'object') {
     parsed.properties = {};
     for (const [key, value] of Object.entries(source.properties as Record<string, unknown>)) {
-      parsed.properties[key] = parseSchema(value) ?? normalizeSchemaField(key, value as Record<string, unknown>);
+      parsed.properties[key] = parseSchema(value, document) ?? normalizeSchemaField(key, value as Record<string, unknown>);
     }
   }
 
   if (source.items && typeof source.items === 'object') {
-    parsed.items = parseSchema(source.items);
+    parsed.items = parseSchema(source.items, document);
   }
 
   return parsed;
@@ -92,24 +121,44 @@ export const parseOpenApiSpecs = (files: RepoFile[]): ApiEndpoint[] => {
           continue;
         }
 
-        const parameters = Array.isArray(operation.parameters)
-          ? (operation.parameters as Record<string, unknown>[])
+        // Resolve operation-level $ref if present
+        const resolvedOp = typeof operation.$ref === 'string'
+          ? (resolveRef(operation.$ref, document) ?? operation)
+          : operation;
+
+        const parameters = Array.isArray(resolvedOp.parameters)
+          ? (resolvedOp.parameters as Record<string, unknown>[])
           : [];
 
         const pathParams = parameters
           .filter((item) => item.in === 'path')
-          .map((item) => normalizeSchemaField(String(item.name ?? 'param'), (item.schema ?? {}) as Record<string, unknown>, Boolean(item.required)));
+          .map((item) => {
+            const schema = typeof item.schema === 'object' && item.schema !== null && typeof (item.schema as Record<string, unknown>).$ref === 'string'
+              ? (resolveRef((item.schema as Record<string, unknown>).$ref as string, document) ?? item.schema)
+              : item.schema;
+            return normalizeSchemaField(String(item.name ?? 'param'), (schema ?? {}) as Record<string, unknown>, Boolean(item.required));
+          });
 
         const queryParams = parameters
           .filter((item) => item.in === 'query')
-          .map((item) => normalizeSchemaField(String(item.name ?? 'query'), (item.schema ?? {}) as Record<string, unknown>, Boolean(item.required)));
+          .map((item) => {
+            const schema = typeof item.schema === 'object' && item.schema !== null && typeof (item.schema as Record<string, unknown>).$ref === 'string'
+              ? (resolveRef((item.schema as Record<string, unknown>).$ref as string, document) ?? item.schema)
+              : item.schema;
+            return normalizeSchemaField(String(item.name ?? 'query'), (schema ?? {}) as Record<string, unknown>, Boolean(item.required));
+          });
 
-        const requestBody = operation.requestBody as Record<string, unknown> | undefined;
-        const jsonBody = requestBody?.content && typeof requestBody.content === 'object'
+        const requestBody = resolvedOp.requestBody as Record<string, unknown> | undefined;
+        const jsonBodySchema = requestBody?.content && typeof requestBody.content === 'object'
           ? ((requestBody.content as Record<string, Record<string, unknown>>)['application/json']?.schema as Record<string, unknown> | undefined)
           : undefined;
 
-        const responsesRaw = operation.responses as Record<string, Record<string, unknown>> | undefined;
+        // Resolve $ref in request body schema
+        const resolvedBodySchema = jsonBodySchema && typeof jsonBodySchema.$ref === 'string'
+          ? (resolveRef(jsonBodySchema.$ref, document) ?? jsonBodySchema)
+          : jsonBodySchema;
+
+        const responsesRaw = resolvedOp.responses as Record<string, Record<string, unknown>> | undefined;
         const responses = responsesRaw
           ? Object.entries(responsesRaw).map(([status, detail]) => ({
               status,
@@ -125,13 +174,13 @@ export const parseOpenApiSpecs = (files: RepoFile[]): ApiEndpoint[] => {
             file,
             confidence: confidenceForFile(file.path),
             evidence: [makeEvidence(file, 'OpenAPI/Swagger spec path operation')],
-            operationId: operation.operationId ? String(operation.operationId) : undefined,
-            summary: operation.summary ? String(operation.summary) : undefined,
-            description: operation.description ? String(operation.description) : undefined,
-            auth: Array.isArray(operation.security) && operation.security.length > 0 ? 'bearer' : 'unknown',
+            operationId: resolvedOp.operationId ? String(resolvedOp.operationId) : undefined,
+            summary: resolvedOp.summary ? String(resolvedOp.summary) : undefined,
+            description: resolvedOp.description ? String(resolvedOp.description) : undefined,
+            auth: Array.isArray(resolvedOp.security) && resolvedOp.security.length > 0 ? 'bearer' : 'unknown',
             pathParams,
             queryParams,
-            body: parseSchema(jsonBody),
+            body: parseSchema(resolvedBodySchema, document),
             responses
           })
         );

@@ -44,7 +44,12 @@ export const fetchWithTimeout = async (
     : undefined;
 
   const forwardAbort = () => controller.abort();
-  options.parentSignal?.addEventListener('abort', forwardAbort, { once: true });
+  if (options.parentSignal?.aborted) {
+    // Signal was already aborted before we could listen — abort immediately.
+    forwardAbort();
+  } else {
+    options.parentSignal?.addEventListener('abort', forwardAbort, { once: true });
+  }
 
   try {
     return await fetch(input, {

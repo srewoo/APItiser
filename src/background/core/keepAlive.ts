@@ -15,5 +15,11 @@ export const registerKeepAliveListener = (): void => {
     if (alarm.name !== HEARTBEAT_ALARM) {
       return;
     }
+    // Perform a minimal storage read to keep the service worker alive.
+    // Without this, Chrome can terminate the worker during long LLM calls
+    // even though an alarm is registered.
+    void chrome.storage.local.get('_heartbeat').then(() => {
+      void chrome.storage.local.set({ _heartbeat: Date.now() });
+    });
   });
 };

@@ -8,7 +8,8 @@ export type CommandMessage =
   | { type: 'START_GENERATION'; payload?: { selectedEndpointIds?: string[] }; contextId?: string }
   | { type: 'CANCEL_JOB'; contextId?: string }
   | { type: 'CLEAR_CONTEXT'; contextId?: string }
-  | { type: 'DOWNLOAD_ARTIFACT'; payload: { artifactId: string }; contextId?: string };
+  | { type: 'DOWNLOAD_ARTIFACT'; payload: { artifactId: string }; contextId?: string }
+  | { type: 'EXPORT_POSTMAN'; contextId?: string };
 
 export type EventMessage =
   | { type: 'STATE_SNAPSHOT'; payload: AppState; contextId?: string }
@@ -30,6 +31,7 @@ export const isCommandMessage = (message: RuntimeMessage): message is CommandMes
     'START_GENERATION',
     'CANCEL_JOB',
     'CLEAR_CONTEXT',
-    'DOWNLOAD_ARTIFACT'
+    'DOWNLOAD_ARTIFACT',
+    'EXPORT_POSTMAN'
   ].includes(message.type);
 };

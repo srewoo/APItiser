@@ -114,7 +114,7 @@ describe('normalizeGeneratedTests', () => {
     expect(quality.issues.some((issue) => issue.message.includes('No concrete path values'))).toBe(true);
   });
 
-  it('fails the batch when repair output is still below the quality threshold', async () => {
+  it('preserves partial tests when repair output is still below the quality threshold', async () => {
     const endpoints: ApiEndpoint[] = [
       {
         id: 'GET::/users/:id',
@@ -140,7 +140,7 @@ describe('normalizeGeneratedTests', () => {
           }
         ]
       })
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         tests: [
           {
             endpointId: 'GET::/users/:id',
@@ -152,13 +152,17 @@ describe('normalizeGeneratedTests', () => {
         ]
       });
 
-    await expect(
-      generateTestSuite({
-        settings: baseSettings,
-        repo: { platform: 'github', owner: 'acme', repo: 'demo' },
-        endpoints
-      })
-    ).rejects.toBeInstanceOf(BatchGenerationError);
+    const result = await generateTestSuite({
+      settings: baseSettings,
+      repo: { platform: 'github', owner: 'acme', repo: 'demo' },
+      endpoints
+    });
+
+    // The job should succeed but the diagnostics should show that it failed the assessment
+    expect(result.tests).toHaveLength(1);
+    expect(result.tests[0].title).toBe('still generic');
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0].assessment.passed).toBe(false);
   });
 
   it('accepts repaired output and reports diagnostics through batch progress', async () => {

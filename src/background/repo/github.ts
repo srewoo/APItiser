@@ -1,22 +1,8 @@
 import type { RepoFile, RepoRef } from '@shared/types';
 import { withRetry } from '@background/utils/retry';
+import { MAX_FILES, rankPath, shouldExcludePath, sortCandidates, supportsPath } from './shared';
+import { checkGitHubRateLimit } from './rateLimit';
 
-const MAX_FILES = 1200;
-const ALLOWED_EXTENSIONS = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.py'];
-const EXCLUDED_SEGMENTS = new Set([
-  'node_modules',
-  'dist',
-  'build',
-  'coverage',
-  '.next',
-  '.nuxt',
-  '.turbo',
-  '.venv',
-  'venv',
-  '__pycache__'
-]);
-
-const supportsPath = (path: string): boolean => ALLOWED_EXTENSIONS.some((extension) => path.endsWith(extension));
 const normalizePath = (value?: string): string => (value ?? '').replace(/^\/+|\/+$/g, '');
 const withinScope = (path: string, scope?: string): boolean => {
   const normalizedScope = normalizePath(scope);
@@ -25,43 +11,6 @@ const withinScope = (path: string, scope?: string): boolean => {
   }
   return path === normalizedScope || path.startsWith(`${normalizedScope}/`);
 };
-
-const shouldExcludePath = (path: string): boolean => path.split('/').some((segment) => EXCLUDED_SEGMENTS.has(segment));
-
-const rankPath = (path: string): number => {
-  let score = 0;
-  const lower = path.toLowerCase();
-
-  if (/(^|\/)(openapi|swagger)[^/]*\.(json|ya?ml)$/i.test(lower)) {
-    score += 120;
-  }
-  if (/(^|\/)(routes?|controllers?|handlers?|endpoints?)(\/|$)/i.test(lower)) {
-    score += 80;
-  }
-  if (/(^|\/)(api|apis|server|backend|services?|app)(\/|$)/i.test(lower)) {
-    score += 50;
-  }
-  if (/(^|\/)(src|lib)(\/|$)/i.test(lower)) {
-    score += 20;
-  }
-  if (/(^|\/)(tests?|__tests__)(\/|$)/i.test(lower)) {
-    score += 10;
-  }
-  if (/\.(ts|tsx|js|jsx|mjs|cjs|py)$/i.test(lower)) {
-    score += 10;
-  }
-
-  return score;
-};
-
-const sortCandidates = <T extends { path: string }>(items: T[]): T[] =>
-  [...items].sort((left, right) => {
-    const scoreDiff = rankPath(right.path) - rankPath(left.path);
-    if (scoreDiff !== 0) {
-      return scoreDiff;
-    }
-    return left.path.localeCompare(right.path);
-  });
 
 const buildHeaders = (token?: string): HeadersInit => {
   const headers: HeadersInit = {
@@ -103,7 +52,15 @@ interface GitHubContentsItem {
   download_url: string | null;
 }
 
-const decodeBase64 = (content: string): string => atob(content.replace(/\n/g, ''));
+const decodeBase64 = (content: string): string => {
+  const cleaned = content.replace(/\n/g, '');
+  const binaryStr = atob(cleaned);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return new TextDecoder('utf-8').decode(bytes);
+};
 
 /**
  * Fallback for large repos where the recursive tree API returns `truncated: true`.
@@ -117,7 +74,8 @@ const fetchGitHubFilesViaContents = async (
   repo: RepoRef,
   token: string | undefined,
   headers: HeadersInit,
-  partialTree: GitHubTreeItem[]
+  partialTree: GitHubTreeItem[],
+  signal?: AbortSignal
 ): Promise<RepoFile[]> => {
   const branch = repo.branch ?? 'HEAD';
   const accumulated: RepoFile[] = [];
@@ -149,7 +107,7 @@ const fetchGitHubFilesViaContents = async (
     let items: GitHubContentsItem[];
     try {
       const response = await withRetry(async () => {
-        const res = await fetch(contentsUrl, { headers });
+        const res = await fetch(contentsUrl, { headers, signal });
         if (!res.ok) {
           throw new Error(`GitHub contents fetch failed (${dirPath}): ${res.status}`);
         }
@@ -181,7 +139,7 @@ const fetchGitHubFilesViaContents = async (
           const blobUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/git/blobs/${item.sha}`;
           try {
             const blob = await withRetry(async () => {
-              const res = await fetch(blobUrl, { headers });
+              const res = await fetch(blobUrl, { headers, signal });
               if (!res.ok) {
                 throw new Error(`GitHub blob fetch failed: ${res.status}`);
               }
@@ -224,14 +182,18 @@ const fetchGitHubFilesViaContents = async (
   return sortCandidates(accumulated).slice(0, MAX_FILES);
 };
 
-export const fetchGitHubRepoFiles = async (repo: RepoRef, token?: string): Promise<RepoFile[]> => {
+export const fetchGitHubRepoFiles = async (
+  repo: RepoRef,
+  token?: string,
+  signal?: AbortSignal
+): Promise<RepoFile[]> => {
   const branch = repo.branch ?? 'HEAD';
   const headers = buildHeaders(token);
 
   const treeUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
 
   const treeJson = await withRetry(async () => {
-    const response = await fetch(treeUrl, { headers });
+    const response = await fetch(treeUrl, { headers, signal });
     if (!response.ok) {
       throw new Error(`GitHub tree fetch failed: ${response.status}`);
     }
@@ -244,7 +206,7 @@ export const fetchGitHubRepoFiles = async (repo: RepoRef, token?: string): Promi
     console.warn(
       `[APItiser] GitHub tree truncated for ${repo.owner}/${repo.repo}. Falling back to Contents API.`
     );
-    return fetchGitHubFilesViaContents(repo, token, headers, treeJson.tree);
+    return fetchGitHubFilesViaContents(repo, token, headers, treeJson.tree, signal);
   }
 
   const candidateFiles = sortCandidates(
@@ -257,25 +219,38 @@ export const fetchGitHubRepoFiles = async (repo: RepoRef, token?: string): Promi
     )
   ).slice(0, MAX_FILES);
 
-  const files = await Promise.all(
-    candidateFiles.map(async (item): Promise<RepoFile> => {
-      const blobUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/git/blobs/${item.sha}`;
-      const blob = await withRetry(async () => {
-        const response = await fetch(blobUrl, { headers });
-        if (!response.ok) {
-          throw new Error(`GitHub blob fetch failed: ${response.status}`);
-        }
-        return (await response.json()) as GitHubBlobResponse;
-      });
+  const CONCURRENCY = 15;
+  const files: RepoFile[] = [];
 
-      return {
-        path: item.path,
-        sha: item.sha,
-        size: blob.size,
-        content: decodeBase64(blob.content)
-      };
-    })
-  );
+  for (let i = 0; i < candidateFiles.length; i += CONCURRENCY) {
+    const batch = candidateFiles.slice(i, i + CONCURRENCY);
+    let lastResponseHeaders: Headers | null = null;
+    const batchResults = await Promise.all(
+      batch.map(async (item): Promise<RepoFile> => {
+        const blobUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/git/blobs/${item.sha}`;
+        const blob = await withRetry(async () => {
+          const response = await fetch(blobUrl, { headers, signal });
+          if (!response.ok) {
+            throw new Error(`GitHub blob fetch failed: ${response.status}`);
+          }
+          lastResponseHeaders = response.headers;
+          return (await response.json()) as GitHubBlobResponse;
+        });
+
+        return {
+          path: item.path,
+          sha: item.sha,
+          size: blob.size,
+          content: decodeBase64(blob.content)
+        };
+      })
+    );
+    // Check rate limit after each batch and sleep if exhausted
+    if (lastResponseHeaders) {
+      await checkGitHubRateLimit(lastResponseHeaders);
+    }
+    files.push(...batchResults);
+  }
 
   return files;
 };

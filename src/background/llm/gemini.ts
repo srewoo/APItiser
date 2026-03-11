@@ -39,15 +39,14 @@ export class GeminiAdapter implements LLMProviderAdapter {
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({
+              systemInstruction: {
+                parts: [{ text: systemPrompt }]
+              },
               generationConfig: {
                 temperature: 0.2,
                 responseMimeType: 'application/json'
               },
               contents: [
-                {
-                  role: 'user',
-                  parts: [{ text: systemPrompt }]
-                },
                 {
                   role: 'user',
                   parts: [{ text: prompt }]

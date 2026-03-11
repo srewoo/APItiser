@@ -6,16 +6,10 @@ import type {
   QualityIssue,
   TestCategory
 } from '@shared/types';
+import { buildExamplePath, defaultExpectedStatus, METHOD_DEFAULTS, sampleValueForField } from './endpointUtils';
 
-const METHOD_DEFAULTS: Record<string, number> = {
-  GET: 200,
-  POST: 201,
-  PUT: 200,
-  PATCH: 200,
-  DELETE: 204,
-  OPTIONS: 200,
-  HEAD: 200
-};
+// METHOD_DEFAULTS, sampleValueForField, buildExamplePath, defaultExpectedStatus
+// are imported from './endpointUtils' above.
 
 const categoriesAsSentence = (categories: TestCategory[]): string =>
   categories
@@ -33,34 +27,8 @@ const categoriesAsSentence = (categories: TestCategory[]): string =>
     })
     .join(', ');
 
-const defaultExpectedStatusForEndpoint = (endpoint: ApiEndpoint): number => {
-  const documented2xx = endpoint.responses
-    .map((response) => Number(response.status))
-    .find((status) => Number.isFinite(status) && status >= 200 && status < 300);
-
-  return documented2xx ?? METHOD_DEFAULTS[endpoint.method] ?? 200;
-};
-
-const sampleValueForField = (name: string, type?: string, format?: string): string | number | boolean => {
-  const normalizedName = name.toLowerCase();
-  const normalizedType = (type ?? '').toLowerCase();
-  const normalizedFormat = (format ?? '').toLowerCase();
-
-  if (normalizedFormat === 'uuid' || normalizedName.includes('uuid')) {
-    return '00000000-0000-4000-8000-000000000000';
-  }
-  if (normalizedFormat === 'email' || normalizedName.includes('email')) {
-    return 'user@example.com';
-  }
-  if (normalizedType === 'integer' || normalizedType === 'number' || normalizedName === 'id' || normalizedName.endsWith('id')) {
-    return 1;
-  }
-  if (normalizedType === 'boolean') {
-    return true;
-  }
-
-  return `${normalizedName || 'sample'}-value`;
-};
+// Local alias for backward compat within this file
+const defaultExpectedStatusForEndpoint = defaultExpectedStatus;
 
 const summarizeBody = (body: ApiEndpoint['body']): Record<string, unknown> | undefined => {
   if (!body) {
@@ -95,13 +63,7 @@ const summarizeBody = (body: ApiEndpoint['body']): Record<string, unknown> | und
   };
 };
 
-const buildExamplePath = (endpoint: ApiEndpoint): string => {
-  const params = new Map(endpoint.pathParams.map((param) => [param.name, param]));
-  return endpoint.path
-    .replace(/:([A-Za-z0-9_]+)\*/g, (_match, name: string) => String(sampleValueForField(name, params.get(name)?.type, params.get(name)?.format)))
-    .replace(/:([A-Za-z0-9_]+)/g, (_match, name: string) => String(sampleValueForField(name, params.get(name)?.type, params.get(name)?.format)))
-    .replace(/\{([^}]+)\}/g, (_match, name: string) => String(sampleValueForField(name, params.get(name)?.type, params.get(name)?.format)));
-};
+// buildExamplePath is imported from './endpointUtils'
 
 const buildExampleObject = (fields: ApiEndpoint['queryParams']): Record<string, unknown> =>
   fields.reduce<Record<string, unknown>>((acc, field) => {
@@ -255,6 +217,7 @@ export const buildPrompt = (batch: ApiEndpoint[], context: GenerateContext): str
     'Security tests should focus on auth absence, auth misuse, IDOR-style access, privilege boundaries, over-posting, and input abuse that is relevant to the endpoint.',
     'Do not output duplicate tests.',
     'Make titles specific and endpoint-aware.',
+    ...(context.customPromptInstructions ? [`Custom Instructions: ${context.customPromptInstructions}`] : []),
     `Constraints: ${JSON.stringify(baseConstraints(context))}`,
     `Endpoints: ${JSON.stringify(endpointInput)}`
   ].join('\n');

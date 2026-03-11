@@ -150,6 +150,14 @@ export interface ExtensionSettings {
   gitlabBaseUrl?: string;
   batchSize: number;
   timeoutMs: number;
+  /** Base URL injected into generated test files (e.g. http://localhost:3000) */
+  baseUrl?: string;
+  /** Custom instructions appended to the LLM prompt */
+  customPromptInstructions?: string;
+  /** Whether to auto-fallback to the next configured provider on error */
+  enableProviderFallback?: boolean;
+  /** UI theme preference */
+  darkMode?: boolean;
 }
 
 export interface JobTimings {
@@ -255,6 +263,7 @@ export interface GenerateContext {
   framework: TestFramework;
   includeCategories: TestCategory[];
   timeoutMs: number;
+  customPromptInstructions?: string;
 }
 
 export interface LLMProviderAdapter {

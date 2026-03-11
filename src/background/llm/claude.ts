@@ -39,7 +39,7 @@ export class ClaudeAdapter implements LLMProviderAdapter {
             },
             body: JSON.stringify({
               model: options.model,
-              max_tokens: 6000,
+              max_tokens: Math.min(Math.max(batch.length * 500, 4000), 16000),
               system: systemPrompt,
               messages: [{ role: 'user', content: prompt }]
             })

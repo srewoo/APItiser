@@ -1,5 +1,6 @@
 import { chunkArray } from '@background/utils/chunks';
 import { getProviderAdapter } from '@background/llm/client';
+import { buildExamplePath, defaultExpectedStatus, METHOD_DEFAULTS, sampleValueForParam } from '@background/llm/endpointUtils';
 import { getFrameworkAdapter } from './frameworks/registry';
 import type {
   ApiEndpoint,
@@ -36,15 +37,8 @@ interface GenerateOptions {
   }) => Promise<void>;
 }
 
-const METHOD_DEFAULTS: Record<string, number> = {
-  GET: 200,
-  POST: 201,
-  PUT: 200,
-  PATCH: 200,
-  DELETE: 204,
-  OPTIONS: 200,
-  HEAD: 200
-};
+// METHOD_DEFAULTS, sampleValueForParam, buildExamplePath, defaultExpectedStatus
+// are imported from '@background/llm/endpointUtils' above.
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -75,32 +69,7 @@ const endpointPathToRegex = (path: string): RegExp => {
 
 const hasPlaceholders = (path: string): boolean => /:\w|\{[^}]+\}/.test(path);
 
-const sampleValueForParam = (name: string, type?: string, format?: string): string => {
-  const normalizedName = name.toLowerCase();
-  const normalizedType = (type ?? '').toLowerCase();
-  const normalizedFormat = (format ?? '').toLowerCase();
-
-  if (normalizedFormat === 'uuid' || normalizedName.includes('uuid')) {
-    return '00000000-0000-4000-8000-000000000000';
-  }
-  if (normalizedType === 'integer' || normalizedType === 'number' || normalizedName.endsWith('id') || normalizedName === 'id') {
-    return '1';
-  }
-  if (normalizedType === 'boolean') {
-    return 'true';
-  }
-
-  return `${normalizedName || 'sample'}-value`;
-};
-
-const buildExamplePath = (endpoint: ApiEndpoint): string => {
-  const paramsByName = new Map(endpoint.pathParams.map((param) => [param.name, param]));
-
-  return endpoint.path
-    .replace(/:([A-Za-z0-9_]+)\*/g, (_match, name: string) => sampleValueForParam(name, paramsByName.get(name)?.type, paramsByName.get(name)?.format))
-    .replace(/:([A-Za-z0-9_]+)/g, (_match, name: string) => sampleValueForParam(name, paramsByName.get(name)?.type, paramsByName.get(name)?.format))
-    .replace(/\{([^}]+)\}/g, (_match, name: string) => sampleValueForParam(name, paramsByName.get(name)?.type, paramsByName.get(name)?.format));
-};
+// sampleValueForParam and buildExamplePath come from endpointUtils import above.
 
 const normalizeRequestPath = (value: unknown, endpoint: ApiEndpoint): string => {
   const candidate = typeof value === 'string' ? value.trim().split('?')[0] : '';
@@ -110,13 +79,7 @@ const normalizeRequestPath = (value: unknown, endpoint: ApiEndpoint): string => 
   return buildExamplePath(endpoint);
 };
 
-const defaultExpectedStatus = (endpoint: ApiEndpoint): number => {
-  const documented = endpoint.responses
-    .map((response) => Number(response.status))
-    .find((status) => Number.isFinite(status) && status >= 200 && status < 300);
-
-  return documented ?? METHOD_DEFAULTS[endpoint.method] ?? 200;
-};
+// defaultExpectedStatus is imported from '@background/llm/endpointUtils' above.
 
 const isCategoryApplicable = (endpoint: ApiEndpoint, category: GeneratedTestCase['category']): boolean => {
   if (category !== 'security') {
@@ -283,17 +246,17 @@ export const assessGeneratedTestQuality = (
 
   return {
     passed: issues.length === 0,
-    issues: issues.slice(0, 20)
+    issues
   };
 };
 
 export class BatchGenerationError extends Error {
-  readonly diagnostics: BatchGenerationDiagnostics;
-
-  constructor(diagnostics: BatchGenerationDiagnostics) {
+  constructor(
+    public readonly diagnostics: BatchGenerationDiagnostics,
+    public readonly partialTests: GeneratedTestCase[]
+  ) {
     super(`Batch ${diagnostics.batchIndex + 1} failed quality gate`);
     this.name = 'BatchGenerationError';
-    this.diagnostics = diagnostics;
   }
 }
 
@@ -310,6 +273,7 @@ const generateBatchWithRepair = async (
     model: options.settings.model,
     signal: options.signal,
     timeoutMs: options.settings.timeoutMs,
+    hardTimeoutMs: options.settings.timeoutMs * 2,
     heartbeatMs: HEARTBEAT_INTERVAL_MS,
     promptMode: 'generate' as const
   };
@@ -346,32 +310,38 @@ const generateBatchWithRepair = async (
     };
   }
 
-  const repaired = await providerAdapter.generateTests(batch, context, {
-    onHeartbeat: makeHeartbeat('repair'),
-    ...baseProviderOptions,
-    promptMode: 'repair',
-    currentTests: normalized,
-    repairIssues: quality.issues
-  });
+  const MAX_REPAIR_ATTEMPTS = 3;
+  let repairCount = 0;
 
-  const repairedNormalized = normalizeGeneratedTests(repaired.tests, options.settings.includeCategories, batch);
-  const repairedQuality = assessGeneratedTestQuality(batch, repairedNormalized, options.settings.includeCategories);
+  while (!quality.passed && repairCount < MAX_REPAIR_ATTEMPTS) {
+    repairCount += 1;
+    const repaired = await providerAdapter.generateTests(batch, context, {
+      onHeartbeat: makeHeartbeat('repair'),
+      ...baseProviderOptions,
+      promptMode: 'repair',
+      currentTests: normalized,
+      repairIssues: quality.issues
+    });
 
-  if (repairedQuality.passed || (repairedNormalized.length >= normalized.length && repairedQuality.issues.length <= quality.issues.length)) {
-    normalized = repairedNormalized;
-    quality = repairedQuality;
+    const repairedNormalized = normalizeGeneratedTests(repaired.tests, options.settings.includeCategories, batch);
+    const repairedQuality = assessGeneratedTestQuality(batch, repairedNormalized, options.settings.includeCategories);
+
+    if (repairedQuality.passed || (repairedNormalized.length >= normalized.length && repairedQuality.issues.length <= quality.issues.length)) {
+      normalized = repairedNormalized;
+      quality = repairedQuality;
+    }
   }
 
   const diagnostics: BatchGenerationDiagnostics = {
     batchIndex: options.batchIndex,
     endpointIds: batch.map((endpoint) => endpoint.id),
     provider: options.settings.provider,
-    repairAttempted: true,
+    repairAttempted: repairCount > 0,
     assessment: quality
   };
 
   if (!quality.passed) {
-    throw new BatchGenerationError(diagnostics);
+    throw new BatchGenerationError(diagnostics, normalized);
   }
 
   return { tests: normalized, diagnostics };
@@ -474,17 +444,21 @@ export const renderGeneratedFiles = (
     files.push(...frameworkAdapter.renderSupportFiles(projectMeta));
   }
 
+  files.push({
+    path: '.env.example',
+    content: 'API_TOKEN=your_token_here\nAPI_BASE_URL=http://localhost:3000\n'
+  });
+
   return files;
 };
 
 export const generateTestSuite = async (options: GenerateOptions): Promise<GenerationResult> => {
-  const providerAdapter = getProviderAdapter(options.settings.provider);
-
   const context: GenerateContext = {
     repo: options.repo,
     framework: options.settings.framework,
     includeCategories: options.settings.includeCategories,
-    timeoutMs: options.settings.timeoutMs
+    timeoutMs: options.settings.timeoutMs,
+    customPromptInstructions: options.settings.customPromptInstructions
   };
 
   const chunks = chunkArray(options.endpoints, options.settings.batchSize);
@@ -492,23 +466,62 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
   const generatedTests: GeneratedTestCase[] = [...(options.initialTests ?? [])];
   const diagnostics: BatchGenerationDiagnostics[] = [];
 
+  const allProviders: Array<ExtensionSettings['provider']> = ['openai', 'claude', 'gemini'];
+  const providersToTry = options.settings.enableProviderFallback
+    ? [options.settings.provider, ...allProviders.filter((p) => p !== options.settings.provider)]
+    : [options.settings.provider];
+
   for (let index = startBatch; index < chunks.length; index += 1) {
     const batch = chunks[index];
-    const result = await generateBatchWithRepair(providerAdapter, batch, context, {
-      ...options,
-      batchIndex: index,
-      totalBatches: chunks.length,
-      generatedTests: [...generatedTests]
-    });
-    generatedTests.push(...result.tests);
-    diagnostics.push(result.diagnostics);
+    let result: Awaited<ReturnType<typeof generateBatchWithRepair>> | null = null;
+    let partialTests: GeneratedTestCase[] | null = null;
+    let partialDiagnostics: BatchGenerationDiagnostics | null = null;
+    let lastError: unknown = null;
+
+    for (const provider of providersToTry) {
+      if (!getProviderKey(options.settings, provider)) {
+        continue;
+      }
+      try {
+        const adapter = getProviderAdapter(provider);
+        result = await generateBatchWithRepair(adapter, batch, context, {
+          ...options,
+          batchIndex: index,
+          totalBatches: chunks.length,
+          generatedTests: [...generatedTests]
+        });
+        break;
+      } catch (err) {
+        lastError = err;
+        if (err instanceof BatchGenerationError) {
+          partialTests = err.partialTests;
+          partialDiagnostics = err.diagnostics;
+          console.warn(`[APItiser] Batch ${index} quality failed with ${provider}. Trying fallback...`);
+        } else {
+          console.warn(`[APItiser] Batch ${index} failed with ${provider}.`, err);
+        }
+      }
+    }
+
+    if (!result) {
+      if (partialTests && partialDiagnostics) {
+        console.warn(`[APItiser] Keeping partial tests for batch ${index} despite quality failure.`);
+        generatedTests.push(...partialTests);
+        diagnostics.push(partialDiagnostics);
+      } else {
+        throw lastError || new Error(`Generation failed for batch ${index}. Configuration may be missing or all providers failed.`);
+      }
+    } else {
+      generatedTests.push(...result.tests);
+      diagnostics.push(result.diagnostics);
+    }
 
     if (options.onBatchComplete) {
       await options.onBatchComplete({
         completedBatches: index + 1,
         totalBatches: chunks.length,
         generatedTests: [...generatedTests],
-        batchDiagnostics: result.diagnostics
+        batchDiagnostics: result ? result.diagnostics : partialDiagnostics!
       });
     }
   }
