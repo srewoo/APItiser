@@ -344,7 +344,7 @@ export function App() {
     }
   };
 
-  const openExtensionDoc = async (path: 'help.html' | 'policypolicy.html') => {
+  const openExtensionDoc = async (path: 'help.html' | 'privacypolicy.html') => {
     const url = chrome.runtime.getURL(path);
     await chrome.tabs.create({ url });
   };

@@ -38,7 +38,7 @@ interface SettingsModalProps {
   onPersistTestFolders: () => void;
   onPersistOpenApiFallback: () => void;
   onImportOpenApiFile: (file: File | null | undefined) => void;
-  onOpenDoc: (path: 'help.html' | 'policypolicy.html') => void;
+  onOpenDoc: (path: 'help.html' | 'privacypolicy.html') => void;
   onExportSettings: () => void;
   onImportSettings: (file: File | null | undefined) => void;
 }
@@ -836,7 +836,7 @@ export function SettingsModal({
             <button type="button" className="ghost utility-btn" onClick={() => onOpenDoc('help.html')}>
               Help
             </button>
-            <button type="button" className="ghost utility-btn" onClick={() => onOpenDoc('policypolicy.html')}>
+            <button type="button" className="ghost utility-btn" onClick={() => onOpenDoc('privacypolicy.html')}>
               Privacy Policy
             </button>
           </div>

@@ -21,7 +21,7 @@ export default defineConfig({
         popup: resolve(__dirname, 'popup.html'),
         sidepanel: resolve(__dirname, 'sidepanel.html'),
         help: resolve(__dirname, 'help.html'),
-        policypolicy: resolve(__dirname, 'policypolicy.html'),
+        privacypolicy: resolve(__dirname, 'privacypolicy.html'),
         'service-worker': resolve(__dirname, 'src/background/service-worker.ts')
       },
       output: {
@@ -30,8 +30,6 @@ export default defineConfig({
         chunkFileNames: 'assets/chunk-[name].js',
         assetFileNames: 'assets/[name][extname]',
         manualChunks: (id) => {
-          if (id.includes('node_modules/jszip')) return 'vendor-jszip';
-          if (id.includes('node_modules')) return 'vendor';
           if (id.includes('/src/background/parser/')) return 'bg-parser';
           if (id.includes('/src/background/generation/')) return 'bg-generation';
           if (id.includes('/src/background/llm/')) return 'bg-llm';

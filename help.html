@@ -37,6 +37,7 @@
       h2 { font-family: "Baskerville", "Iowan Old Style", serif; margin: 0; }
       h1 { font-size: 30px; line-height: 1.1; }
       h2 { margin-top: 22px; font-size: 20px; }
+      h3 { margin-top: 16px; font-size: 16px; color: var(--text); }
       p, li { color: var(--muted); }
       ul { margin: 8px 0 0 20px; padding: 0; }
       .badge {
@@ -55,44 +56,152 @@
         border-radius: 6px;
         padding: 1px 5px;
       }
+      .divider {
+        border: none;
+        border-top: 1px solid var(--line);
+        margin: 24px 0 8px;
+      }
     </style>
   </head>
   <body>
     <main>
       <h1>APItiser Help</h1>
-      <div class="badge">Scan -> Generate -> Download</div>
+      <div class="badge">Scan &rarr; Generate &rarr; Validate &rarr; Download</div>
 
       <h2>Quick Start</h2>
       <ul>
         <li>Open a GitHub or GitLab repository page in the active tab.</li>
-        <li>Open APItiser side panel and click <code>Scan Repo</code>.</li>
-        <li>Review detected endpoints, then click <code>Generate Tests</code>.</li>
-        <li>Click <code>Download Tests</code> to save the zip artifact.</li>
+        <li>Open APItiser from the toolbar icon (opens as a side panel).</li>
+        <li>In <strong>Settings</strong>, add your LLM provider API key (OpenAI, Claude, or Gemini).</li>
+        <li>Click <code>Scan Repo</code> to detect API endpoints.</li>
+        <li>Review detected endpoints, select/deselect as needed, then click <code>Generate Tests</code>.</li>
+        <li>After generation completes, click <code>Download Tests</code> to save the ZIP artifact.</li>
       </ul>
 
-      <h2>Settings You Should Configure</h2>
+      <hr class="divider" />
+
+      <h2>Settings Reference</h2>
+
+      <h3>Provider &amp; Model</h3>
       <ul>
-        <li>Provider/model and API key (OpenAI, Claude, or Gemini).</li>
-        <li>Framework (Jest, Mocha + Chai, or Pytest).</li>
-        <li>Test file directories to skip already covered endpoints.</li>
-        <li>Optional OpenAPI fallback spec for missing static routes.</li>
+        <li><strong>Provider</strong> &mdash; Choose OpenAI, Claude, or Gemini.</li>
+        <li><strong>Model</strong> &mdash; Select from available models for the chosen provider.</li>
+        <li><strong>API Key</strong> &mdash; Paste the provider API key. Keys are stored locally and never sent to any APItiser server.</li>
+        <li><strong>Auto-fallback</strong> &mdash; When enabled, if the primary provider fails, APItiser automatically tries the next configured provider.</li>
       </ul>
+
+      <h3>Repo Access</h3>
+      <ul>
+        <li><strong>GitHub Token</strong> &mdash; Optional for public repos. Required for private repositories or to increase rate limits.</li>
+        <li><strong>GitLab Token</strong> &mdash; Required for private repositories on GitLab.</li>
+        <li><strong>GitLab Base URL</strong> &mdash; For self-hosted GitLab instances (defaults to <code>https://gitlab.com</code>).</li>
+        <li><strong>Validate Access</strong> &mdash; Checks token scopes, repository visibility, and host reachability before scanning.</li>
+      </ul>
+
+      <h3>Test Configuration</h3>
+      <ul>
+        <li><strong>Framework</strong> &mdash; Jest, Mocha + Chai, or Pytest. Determines the generated test file format.</li>
+        <li><strong>Batch Size</strong> &mdash; Number of endpoints sent per LLM request (1&ndash;20, default 6).</li>
+        <li><strong>Timeout</strong> &mdash; Maximum seconds per batch before the request is aborted.</li>
+        <li><strong>Base URL</strong> &mdash; Injected into generated test files (e.g. <code>http://localhost:3000</code>). Also used for live validation.</li>
+        <li><strong>Test Folders</strong> &mdash; Comma-separated directories where existing tests live. APItiser checks these to detect already-covered endpoints.</li>
+        <li><strong>Skip Existing Tests</strong> &mdash; When on, endpoints that already have tests are excluded from generation.</li>
+        <li><strong>Categories</strong> &mdash; Toggle which test types to generate: positive, negative, edge, and security.</li>
+        <li><strong>Custom Prompt Instructions</strong> &mdash; Free-text instructions appended to the LLM prompt (e.g. "Always test pagination with limit=0").</li>
+      </ul>
+
+      <h3>Live Validation</h3>
+      <ul>
+        <li><strong>Validate Generated Tests</strong> &mdash; When enabled, APItiser executes each generated test against the Base URL before packaging.</li>
+        <li><strong>Auto-Repair</strong> &mdash; When enabled, tests that fail live validation are sent back to the LLM for automatic repair.</li>
+        <li><strong>Repair Rounds</strong> &mdash; Maximum number of validation &rarr; repair cycles (0&ndash;5, default 2).</li>
+        <li><strong>Runtime Auth Mode</strong> &mdash; Choose how authentication is supplied during live validation: None, Bearer token, API key, Cookie session, or OAuth2.</li>
+        <li><strong>Runtime Credentials</strong> &mdash; API Token, API Key, Session Cookie, and CSRF Token values used exclusively during live validation.</li>
+      </ul>
+
+      <h3>Validation Setup Flow</h3>
+      <p>
+        For APIs that require login or token exchange before validation, configure setup steps that run before the test suite. Each step can:
+      </p>
+      <ul>
+        <li>Send a request to a login or token endpoint.</li>
+        <li>Extract tokens from the JSON response body, response headers, or cookies.</li>
+        <li>Pass extracted values to subsequent validation requests as bearer tokens, API keys, CSRF tokens, or session cookies.</li>
+      </ul>
+
+      <h3>OpenAPI Fallback</h3>
+      <ul>
+        <li>Paste or import an OpenAPI spec (JSON or YAML) for endpoints that cannot be detected from source code.</li>
+        <li>The fallback spec is merged into scan results alongside code-detected routes.</li>
+      </ul>
+
+      <h3>Settings Backup</h3>
+      <ul>
+        <li><strong>Export Settings</strong> &mdash; Download a JSON file with non-sensitive settings. API keys, tokens, runtime credentials, and setup flows are excluded.</li>
+        <li><strong>Import Settings</strong> &mdash; Upload a previously exported settings file to restore configuration.</li>
+      </ul>
+
+      <hr class="divider" />
+
+      <h2>Endpoint Selection</h2>
+      <p>
+        After scanning, you can select or deselect individual endpoints for generation. Use the method filter to narrow the list by HTTP method. The <code>Select All</code> and <code>Clear All</code> buttons update the selection in bulk.
+      </p>
+
+      <h2>Readiness Assessment</h2>
+      <p>
+        After generation, each artifact receives a readiness label:
+      </p>
+      <ul>
+        <li><strong>Production Candidate</strong> &mdash; All tests passed live validation, have strong assertions, and no heuristic-only evidence.</li>
+        <li><strong>Validated</strong> &mdash; All tests passed live validation, but some rely on heuristic evidence or lack schema assertions.</li>
+        <li><strong>Review Required</strong> &mdash; Live validation did not run or some tests failed. Manual review recommended.</li>
+        <li><strong>Scaffold</strong> &mdash; No tests were generated.</li>
+      </ul>
+
+      <h2>Test Preview</h2>
+      <p>
+        After generation completes, click <strong>Preview Tests</strong> to inspect all generated test cases, their categories, expected status codes, and assertions before downloading.
+      </p>
+
+      <h2>Postman Export</h2>
+      <p>
+        Click <strong>Export Postman</strong> to download a Postman collection JSON file based on the generated tests. Useful for manual API exploration alongside automated tests.
+      </p>
 
       <h2>Context Behavior</h2>
       <p>
-        APItiser stores context per page. Switching tabs/pages shows that page’s own scan, generated tests, and progress.
+        APItiser isolates state per browser tab and page URL. Switching tabs shows that tab's own scan results, generated tests, progress, and history. Each context maintains independent job history and artifacts.
+      </p>
+
+      <h2>Auto-Resume</h2>
+      <p>
+        If Chrome terminates the service worker during a long-running scan or generation, APItiser automatically resumes from the last checkpoint when the worker restarts. No data is lost.
       </p>
 
       <h2>Clear Action</h2>
       <p>
-        <code>Clear</code> removes the current page context: active job, history, generated tests, and artifacts for that page only.
+        <code>Clear</code> removes the current page context only: active job, job history, generated tests, and artifacts for that page. Other page contexts and global settings are not affected.
       </p>
+
+      <hr class="divider" />
+
+      <h2>Supported Frameworks</h2>
+      <ul>
+        <li>Express, Fastify, NestJS, Koa, Hono, Next.js API routes</li>
+        <li>FastAPI, Flask (Python)</li>
+        <li>Spring Boot, Gin (Java/Go)</li>
+        <li>Any API described via an OpenAPI 3.x spec (JSON or YAML)</li>
+      </ul>
 
       <h2>Troubleshooting</h2>
       <ul>
-        <li>If scan fails, validate repo access and token scopes in Settings.</li>
-        <li>If generation fails, check provider API key and model selection.</li>
-        <li>Reload the extension from <code>chrome://extensions</code> after updates.</li>
+        <li>If scan fails, use <strong>Validate Access</strong> in Settings to check token scopes and repository visibility.</li>
+        <li>If generation fails, verify the provider API key and model selection. Check that the key has sufficient quota.</li>
+        <li>If live validation fails, confirm the Base URL is reachable and that runtime credentials are correct.</li>
+        <li>For rate limit issues with GitHub/GitLab, add a personal access token in Settings to increase limits.</li>
+        <li>For repos with unusual metaprogramming patterns, use the OpenAPI Fallback to supply endpoint definitions manually.</li>
+        <li>Reload the extension from <code>chrome://extensions</code> after updating the extension files.</li>
       </ul>
     </main>
   </body>

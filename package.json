@@ -1,6 +1,6 @@
 {
   "name": "apitiser-extension",
-  "version": "1.0",
+  "version": "1.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,11 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "benchmark": "vitest run tests/benchmarks/goldStandard.test.ts"
+    "benchmark": "vitest run tests/benchmarks/goldStandard.test.ts",
+    "lint": "eslint src/ tests/",
+    "lint:fix": "eslint src/ tests/ --fix",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\""
   },
   "dependencies": {
     "@babel/parser": "^7.29.0",
@@ -22,11 +26,17 @@
     "yaml": "^2.8.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/chrome": "^0.0.287",
     "@types/node": "^22.13.14",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "@typescript-eslint/eslint-plugin": "^8.57.0",
+    "@typescript-eslint/parser": "^8.57.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1",
     "typescript": "^5.7.3",
     "vite": "^5.4.11",
     "vitest": "^2.1.9"

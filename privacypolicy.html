@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>APItiser Privacy Policy</title>
+    <style>
+      :root {
+        --bg: #f4f1ea;
+        --surface: #fffdf9;
+        --text: #1c1a16;
+        --muted: #666159;
+        --line: rgba(41, 36, 28, 0.17);
+        --accent: #0b5f7a;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        padding: 32px 22px 48px;
+        background: linear-gradient(140deg, #f8f5ee, var(--bg));
+        color: var(--text);
+        font: 15px/1.6 "Avenir Next", "Segoe UI Variable", sans-serif;
+      }
+
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 24px;
+      }
+
+      h1,
+      h2 { font-family: "Baskerville", "Iowan Old Style", serif; margin: 0; }
+      h1 { font-size: 30px; line-height: 1.12; }
+      h2 { margin-top: 22px; font-size: 20px; }
+      p, li { color: var(--muted); }
+      ul { margin: 8px 0 0 20px; padding: 0; }
+      .meta {
+        margin-top: 8px;
+        color: var(--accent);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      code {
+        background: #f1ede4;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 1px 5px;
+      }
+      .divider {
+        border: none;
+        border-top: 1px solid var(--line);
+        margin: 24px 0 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>APItiser Privacy Policy</h1>
+      <p class="meta">Last updated: March 13, 2026</p>
+
+      <h2>Overview</h2>
+      <p>
+        APItiser is a Chrome extension that runs entirely inside your browser. It scans repository files, detects API endpoints, generates test suites using LLM providers, and optionally validates those tests against a live API. APItiser does not operate its own backend servers.
+      </p>
+
+      <hr class="divider" />
+
+      <h2>Data Stored Locally</h2>
+      <p>All data is stored in <code>chrome.storage.local</code> on your machine and never leaves your browser except as described below.</p>
+      <ul>
+        <li>Extension settings: provider, model, framework, batch size, timeout, base URL, test directories, categories, and custom prompt instructions.</li>
+        <li>Repository access tokens: GitHub token, GitLab token, GitLab base URL.</li>
+        <li>LLM provider API keys: OpenAI, Claude, and Gemini keys.</li>
+        <li>Runtime validation credentials: API token, API key, CSRF token, session cookie, and setup flow step definitions.</li>
+        <li>Per-page context state: scan results, detected endpoints, generated tests, job progress, coverage summaries, readiness assessments, batch diagnostics, and run metrics.</li>
+        <li>Generated artifacts (ZIP files encoded as base64) for download, retained until you clear the context or remove the extension.</li>
+        <li>Job history (up to 20 jobs per context), artifact history (up to 10 per context), and run metrics (up to 100 per context).</li>
+      </ul>
+
+      <h2>External Requests</h2>
+      <p>APItiser sends requests to the following external services. These requests originate directly from your browser, not from any APItiser server.</p>
+
+      <ul>
+        <li>
+          <strong>GitHub API</strong> (<code>api.github.com</code>) &mdash; Repository tree, blob, and contents requests to scan source files. Your GitHub token is sent as a Bearer authorization header when configured.
+        </li>
+        <li>
+          <strong>GitLab API</strong> (<code>gitlab.com/api/v4</code> or your configured GitLab base URL) &mdash; Repository tree and file requests. Your GitLab token is sent as a Private-Token header when configured.
+        </li>
+        <li>
+          <strong>OpenAI API</strong> (<code>api.openai.com</code>) &mdash; Chat completion requests to generate or repair test specifications. Your OpenAI API key is sent as a Bearer authorization header.
+        </li>
+        <li>
+          <strong>Anthropic API</strong> (<code>api.anthropic.com</code>) &mdash; Message requests to generate or repair test specifications. Your Claude API key is sent via the <code>x-api-key</code> header.
+        </li>
+        <li>
+          <strong>Google Generative Language API</strong> (<code>generativelanguage.googleapis.com</code>) &mdash; Content generation requests. Your Gemini API key is sent as a query parameter.
+        </li>
+        <li>
+          <strong>Your configured Base URL</strong> &mdash; When live validation is enabled, APItiser sends HTTP requests to the Base URL you configure to validate generated tests. Runtime credentials (tokens, cookies, API keys) you provide are sent as part of these requests.
+        </li>
+      </ul>
+
+      <h2>What APItiser Sends to LLM Providers</h2>
+      <p>When generating tests, APItiser sends the following information to your chosen LLM provider:</p>
+      <ul>
+        <li>API endpoint metadata: HTTP method, path, path/query parameters, request body schema, response schemas, authentication hints, and source evidence snippets.</li>
+        <li>Repository owner and repository name (for generated file headers).</li>
+        <li>Framework, categories, and custom prompt instructions you configure.</li>
+      </ul>
+      <p>
+        APItiser does <strong>not</strong> send full source file contents to LLM providers. Only structured endpoint metadata extracted during the parsing step is included in prompts.
+      </p>
+
+      <h2>API Keys and Tokens</h2>
+      <ul>
+        <li>All keys and tokens are stored in <code>chrome.storage.local</code> under the extension context.</li>
+        <li>Keys are never sent to any APItiser-owned server or third party other than their respective providers.</li>
+        <li>When you export settings, all keys, tokens, runtime credentials, and setup flow definitions are automatically excluded from the export file.</li>
+      </ul>
+
+      <h2>Live Validation and Runtime Credentials</h2>
+      <p>
+        When live validation is enabled, APItiser makes HTTP requests directly from your browser to the Base URL you configure. Runtime credentials (bearer tokens, API keys, session cookies, CSRF tokens) are sent only to that Base URL. If you configure setup flow steps (e.g. a login request), credentials used in those steps are also sent only to the Base URL.
+      </p>
+
+      <h2>Context Isolation</h2>
+      <p>
+        APItiser isolates state by browser tab and page URL. Each page context has its own scan results, generated tests, job history, and artifacts. Clearing one page context does not affect other page contexts or global settings.
+      </p>
+
+      <h2>Retention and Deletion</h2>
+      <ul>
+        <li>Use <code>Clear</code> in the extension UI to delete the current page context data (active job, history, tests, and artifacts for that page).</li>
+        <li>Global settings (provider, keys, framework) persist across contexts until you change them.</li>
+        <li>Removing the extension from Chrome deletes all extension-local data.</li>
+        <li>Job history is automatically capped at 20 entries, artifacts at 10, and run metrics at 100 per context.</li>
+      </ul>
+
+      <h2>Content Security Policy</h2>
+      <p>
+        APItiser enforces a strict Content Security Policy on all extension pages: <code>script-src 'self'; object-src 'self'</code>. No inline scripts, remote scripts, or dynamic code execution (<code>eval</code>) is permitted.
+      </p>
+
+      <h2>Permissions</h2>
+      <p>APItiser requests the following Chrome permissions:</p>
+      <ul>
+        <li><code>storage</code> &mdash; Persist settings and state locally.</li>
+        <li><code>tabs</code> &mdash; Detect the active tab URL to identify the current repository.</li>
+        <li><code>alarms</code> &mdash; Keep the service worker alive during long-running scans and generation.</li>
+        <li><code>downloads</code> &mdash; Trigger artifact and export downloads.</li>
+        <li><code>notifications</code> &mdash; Notify when scans or generation complete.</li>
+        <li><code>sidePanel</code> &mdash; Display the APItiser UI as a side panel.</li>
+      </ul>
+
+      <h2>Contact</h2>
+      <p>
+        If you distribute this extension publicly, replace this section with your contact email or support URL.
+      </p>
+    </main>
+  </body>
+</html>
