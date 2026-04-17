@@ -1,4 +1,5 @@
 import { DEFAULT_SETTINGS, STORAGE_KEY } from '@shared/constants';
+import { getPlatform } from '@shared/platform';
 import type {
   AppState,
   ExtensionSettings,
@@ -106,12 +107,12 @@ const normalizeStore = (persisted: unknown): StoredStateV2 => {
 };
 
 const loadStore = async (): Promise<StoredStateV2> => {
-  const raw = await chrome.storage.local.get(STORAGE_KEY);
-  return normalizeStore(raw[STORAGE_KEY]);
+  const raw = await getPlatform().storage.get(STORAGE_KEY);
+  return normalizeStore(raw);
 };
 
 const saveStore = async (store: StoredStateV2): Promise<void> => {
-  await chrome.storage.local.set({ [STORAGE_KEY]: store });
+  await getPlatform().storage.set(STORAGE_KEY, store);
 };
 
 const updateContext = (store: StoredStateV2, contextId: string, patch: Partial<ContextState>): void => {

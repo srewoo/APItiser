@@ -1,8 +1,10 @@
 import type { JobState } from '@shared/types';
+import { getPlatform } from '@shared/platform';
 
 const setBadge = (text: string, color: string) => {
-  chrome.action.setBadgeText({ text });
-  chrome.action.setBadgeBackgroundColor({ color });
+  const { action } = getPlatform();
+  action.setBadgeText({ text });
+  action.setBadgeBackgroundColor({ color });
 };
 
 export const clearBadge = () => setBadge('', '#000000');

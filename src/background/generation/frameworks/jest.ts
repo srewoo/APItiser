@@ -199,7 +199,7 @@ ${readinessNotes}`
     };
   }
 
-  renderSupportFiles(): GeneratedFile[] {
+  renderSupportFiles(_projectMeta?: ProjectMeta): GeneratedFile[] {
     return [
       {
         path: 'jest.config.cjs',

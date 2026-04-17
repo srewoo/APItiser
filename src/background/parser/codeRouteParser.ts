@@ -2,54 +2,19 @@ import { parse } from '@babel/parser';
 import type { Expression, File, ObjectExpression } from '@babel/types';
 import traverse from '@babel/traverse';
 import * as t from '@babel/types';
-import type { ApiEndpoint, EndpointEvidence, RepoFile } from '@shared/types';
+import type { ApiEndpoint, RepoFile } from '@shared/types';
 import { buildEndpoint, clampConfidence, joinPath, makeEvidence, normalizePath } from './endpointBuilder';
+import { parsePythonRoutes } from './languages/python';
+import { parseGoRoutes } from './languages/go';
+import { parseSpringRoutes } from './languages/java';
+import type { FileAnalysis, ImportBinding, MountSignal, RouteSignal } from './routeTypes';
 
 const JS_FILE_REGEX = /\.(?:[cm]?[jt]sx?)$/i;
-const PY_FILE_REGEX = /\.py$/i;
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 const EXPRESS_IMPORTS = new Set(['express']);
 const FASTIFY_IMPORTS = new Set(['fastify']);
 const KOA_IMPORTS = new Set(['koa-router', '@koa/router']);
 const HONO_IMPORTS = new Set(['hono']);
-
-interface ImportBinding {
-  source: string;
-  imported: string;
-  resolvedPath?: string;
-}
-
-interface RouteSignal {
-  method: string;
-  path: string;
-  source: ApiEndpoint['source'];
-  owner: string;
-  file: RepoFile;
-  confidence: number;
-  evidence: EndpointEvidence[];
-}
-
-interface MountSignal {
-  file: RepoFile;
-  parentOwner: string;
-  childOwner: string;
-  prefix: string;
-  confidencePenalty: number;
-  evidence: EndpointEvidence;
-}
-
-interface FileAnalysis {
-  file: RepoFile;
-  imports: Map<string, ImportBinding>;
-  routes: RouteSignal[];
-  mounts: MountSignal[];
-  ownerKind: Map<string, ApiEndpoint['source']>;
-  namedExports: Map<string, string>;
-  defaultExportOwner?: string;
-}
-
-const GO_FILE_REGEX = /\.go$/i;
-const JAVA_FILE_REGEX = /\.java$/i;
 
 const normalizeFsPath = (input: string): string => {
   const parts = input.split('/');
@@ -857,123 +822,6 @@ const applyMounts = (analyses: FileAnalysis[]): RouteSignal[] => {
   }
 
   return known;
-};
-
-const parsePythonRoutes = (files: RepoFile[]): RouteSignal[] => {
-  const routes: RouteSignal[] = [];
-
-  for (const file of files) {
-    if (!PY_FILE_REGEX.test(file.path)) {
-      continue;
-    }
-
-    const isFastApi = /from\s+fastapi\s+import|FastAPI\s*\(/i.test(file.content);
-    const source: ApiEndpoint['source'] = isFastApi ? 'fastapi' : 'flask';
-
-    for (const match of file.content.matchAll(/@(\w+)\.(get|post|put|patch|delete|options|head)\(\s*["']([^"']+)["']/gim)) {
-      const method = match[2].toUpperCase();
-      const path = normalizePath(match[3].replace(/\{([A-Za-z0-9_]+)\}/g, ':$1'));
-      routes.push({
-        method,
-        path,
-        source,
-        owner: match[1],
-        file,
-        confidence: 0.92,
-        evidence: [makeEvidence(file, `${source} decorator route`, match.index ?? undefined)]
-      });
-    }
-
-    for (const match of file.content.matchAll(/@(\w+)\.route\(\s*["']([^"']+)["'][^)]*methods\s*=\s*\[([^\]]+)\]/gim)) {
-      const methodTokens = match[3].match(/["']([A-Za-z]+)["']/gim) ?? [];
-      const methods = methodTokens
-        .map((token) => token.replace(/["']/g, '').toUpperCase())
-        .filter((method) => HTTP_METHODS.has(method));
-      for (const method of methods) {
-        routes.push({
-          method,
-          path: normalizePath(match[2].replace(/\{([A-Za-z0-9_]+)\}/g, ':$1')),
-          source: 'flask',
-          owner: match[1],
-          file,
-          confidence: 0.9,
-          evidence: [makeEvidence(file, 'flask @route methods declaration', match.index ?? undefined)]
-        });
-      }
-    }
-  }
-
-  return routes;
-};
-
-const parseGoRoutes = (files: RepoFile[]): RouteSignal[] => {
-  const routes: RouteSignal[] = [];
-
-  for (const file of files) {
-    if (!GO_FILE_REGEX.test(file.path)) {
-      continue;
-    }
-
-    const groupPrefixes = new Map<string, string>();
-    for (const match of file.content.matchAll(/\b(\w+)\s*:=\s*\w+\.Group\(\s*"([^"]+)"\s*\)/g)) {
-      groupPrefixes.set(match[1], normalizePath(match[2]));
-    }
-
-    for (const match of file.content.matchAll(/\b(\w+)\.(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\(\s*"([^"]+)"/g)) {
-      const owner = match[1];
-      const prefix = groupPrefixes.get(owner) ?? '';
-      routes.push({
-        method: match[2].toUpperCase(),
-        path: joinPath(prefix, match[3]),
-        source: 'gin',
-        owner,
-        file,
-        confidence: prefix ? 0.88 : 0.84,
-        evidence: [makeEvidence(file, 'gin route registration', match.index ?? undefined)]
-      });
-    }
-  }
-
-  return routes;
-};
-
-const parseSpringRoutes = (files: RepoFile[]): RouteSignal[] => {
-  const routes: RouteSignal[] = [];
-
-  for (const file of files) {
-    if (!JAVA_FILE_REGEX.test(file.path)) {
-      continue;
-    }
-
-    const classPrefixMatch = file.content.match(/@RequestMapping\((?:value|path)?\s*=?\s*\{?\s*"([^"]+)"/);
-    const classPrefix = classPrefixMatch ? normalizePath(classPrefixMatch[1]) : '';
-
-    for (const match of file.content.matchAll(/@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\(([\s\S]*?)\)/g)) {
-      const annotation = match[1];
-      const annotationBody = match[2];
-      const pathMatch = annotationBody.match(/(?:value|path)?\s*=?\s*\{?\s*"([^"]+)"/);
-      const methodMatch = annotationBody.match(/RequestMethod\.(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)/);
-      if (annotation === 'RequestMapping' && !methodMatch) {
-        continue;
-      }
-      const method = annotation === 'RequestMapping'
-        ? (methodMatch?.[1] ?? 'GET')
-        : annotation.replace('Mapping', '').replace('Get', 'GET').replace('Post', 'POST').replace('Put', 'PUT').replace('Patch', 'PATCH').replace('Delete', 'DELETE');
-      const methodPath = pathMatch?.[1] ?? '';
-
-      routes.push({
-        method: method.toUpperCase(),
-        path: joinPath(classPrefix, methodPath.replace(/\{([A-Za-z0-9_]+)\}/g, ':$1')),
-        source: 'spring',
-        owner: 'controller',
-        file,
-        confidence: classPrefix ? 0.9 : 0.86,
-        evidence: [makeEvidence(file, 'spring controller mapping', match.index ?? undefined)]
-      });
-    }
-  }
-
-  return routes;
 };
 
 const inferAuthMetadata = (content: string): { auth: ApiEndpoint['auth']; authHints?: ApiEndpoint['authHints'] } => {

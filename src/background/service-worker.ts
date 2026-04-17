@@ -894,39 +894,7 @@ const autoResumeActiveJob = async (): Promise<void> => {
   }
 };
 
-chrome.runtime.onInstalled.addListener(async () => {
-  const state = await loadState();
-  await saveState(state);
-  clearBadge();
-  await configureSidePanelDefaults();
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  void configureSidePanelDefaults();
-  void autoResumeActiveJob();
-});
-
-chrome.action.onClicked.addListener((tab) => {
-  if (tab.id !== undefined) {
-    void openSidePanelForTab(tab.id);
-  }
-});
-
-chrome.tabs.onActivated.addListener(({ tabId }) => {
-  void ensureSidePanelForTab(tabId);
-});
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'loading') {
-    void ensureSidePanelForTab(tabId);
-  }
-});
-
-registerKeepAliveListener();
-void configureSidePanelDefaults();
-void autoResumeActiveJob();
-
-chrome.runtime.onMessage.addListener((message: CommandMessage, _sender, sendResponse) => {
+const handleMessage = (message: CommandMessage, _sender: unknown, sendResponse: (response: EventMessage) => void): boolean => {
   const run = async (): Promise<void> => {
     try {
       const contextId = resolveContextId(message.contextId);
@@ -994,4 +962,51 @@ chrome.runtime.onMessage.addListener((message: CommandMessage, _sender, sendResp
 
   void run();
   return true;
-});
+};
+
+export const registerListeners = (): void => {
+  chrome.runtime.onInstalled.addListener(async () => {
+    const state = await loadState();
+    await saveState(state);
+    clearBadge();
+    await configureSidePanelDefaults();
+  });
+
+  chrome.runtime.onStartup.addListener(() => {
+    void configureSidePanelDefaults();
+    void autoResumeActiveJob();
+  });
+
+  chrome.action.onClicked.addListener((tab) => {
+    if (tab.id !== undefined) {
+      void openSidePanelForTab(tab.id);
+    }
+  });
+
+  chrome.tabs.onActivated.addListener(({ tabId }) => {
+    void ensureSidePanelForTab(tabId);
+  });
+
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') {
+      void ensureSidePanelForTab(tabId);
+    }
+  });
+
+  registerKeepAliveListener();
+  chrome.runtime.onMessage.addListener(handleMessage);
+};
+
+export const bootstrap = (): void => {
+  registerListeners();
+  void configureSidePanelDefaults();
+  void autoResumeActiveJob();
+};
+
+// Only auto-bootstrap in real service worker context (not in tests).
+// Tests import the module to access `handleMessage`, `registerListeners`, or `bootstrap` directly.
+if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'test') {
+  bootstrap();
+}
+
+export { handleMessage };

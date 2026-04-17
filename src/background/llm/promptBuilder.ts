@@ -295,17 +295,128 @@ export const buildProviderPrompt = (
   return [providerLead, basePrompt].join('\n');
 };
 
-const jsonBlockRegex = /```json\s*([\s\S]*?)```/i;
+const fencedJsonRegex = /```(?:json|javascript|js)?\s*([\s\S]*?)```/gi;
 
-export const parseProviderOutput = (value: string) => {
-  const fenced = value.match(jsonBlockRegex);
-  const raw = fenced ? fenced[1].trim() : value.trim();
-  const parsed = JSON.parse(raw);
+const interpretParsed = (parsed: unknown): unknown[] | null => {
   if (Array.isArray(parsed)) {
     return parsed;
   }
-  if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { tests?: unknown[] }).tests)) {
-    return (parsed as { tests: unknown[] }).tests;
+  if (parsed && typeof parsed === 'object') {
+    const container = parsed as Record<string, unknown>;
+    if (Array.isArray(container.tests)) {
+      return container.tests;
+    }
+    if (Array.isArray(container.testCases)) {
+      return container.testCases;
+    }
+    if (Array.isArray(container.results)) {
+      return container.results;
+    }
+    if (Array.isArray(container.data)) {
+      return container.data;
+    }
   }
+  return null;
+};
+
+const stripTrailingCommas = (raw: string): string => raw.replace(/,\s*([}\]])/g, '$1');
+
+const tryParse = (raw: string): unknown[] | null => {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const attempts = [trimmed, stripTrailingCommas(trimmed)];
+  for (const attempt of attempts) {
+    try {
+      const parsed = JSON.parse(attempt);
+      const result = interpretParsed(parsed);
+      if (result) {
+        return result;
+      }
+    } catch {
+      // fall through to next strategy
+    }
+  }
+  return null;
+};
+
+const extractBalancedBlock = (value: string, open: '{' | '['): string | null => {
+  const close = open === '{' ? '}' : ']';
+  const start = value.indexOf(open);
+  if (start === -1) {
+    return null;
+  }
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < value.length; i += 1) {
+    const ch = value[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (ch === open) {
+      depth += 1;
+    } else if (ch === close) {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+};
+
+export const parseProviderOutput = (value: string): unknown[] => {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('Provider output was empty');
+  }
+
+  // 1. Direct parse of the whole payload.
+  const direct = tryParse(value);
+  if (direct) {
+    return direct;
+  }
+
+  // 2. Any fenced block (```json, ```javascript, or just ```), try each in order.
+  const fencedMatches = [...value.matchAll(fencedJsonRegex)];
+  for (const match of fencedMatches) {
+    const block = tryParse(match[1]);
+    if (block) {
+      return block;
+    }
+  }
+
+  // 3. Fall back to the first balanced { ... } or [ ... ] substring. This handles
+  //    providers that wrap JSON in prose, prepend commentary, or add trailing notes.
+  for (const opener of ['{', '['] as const) {
+    let remaining = value;
+    let safetyCounter = 0;
+    while (remaining && safetyCounter < 10) {
+      safetyCounter += 1;
+      const block = extractBalancedBlock(remaining, opener);
+      if (!block) {
+        break;
+      }
+      const parsed = tryParse(block);
+      if (parsed) {
+        return parsed;
+      }
+      remaining = remaining.slice(remaining.indexOf(block) + block.length);
+    }
+  }
+
   throw new Error('Provider output was not a tests array or object');
 };

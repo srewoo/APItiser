@@ -4,12 +4,14 @@ import type { AppState, JobStage, RepoRef, TestCategory } from '@shared/types';
 import type { EventMessage } from '@shared/messages';
 import { sendCommand } from './runtime';
 import { parseRepoFromUrl } from '@shared/repo';
+import { usePopupState } from './hooks/usePopupState';
 import { SettingsModal } from './components/SettingsModal';
 import { ProgressTimeline } from './components/ProgressTimeline';
 import { EndpointList } from './components/EndpointList';
 import { CoveragePanel, PerformancePanel } from './components/CoveragePanel';
 import { ActionFooter } from './components/ActionFooter';
 import { TestPreviewModal } from './components/TestPreviewModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 const displayPlatform = (repo: RepoRef | null): string => {
   if (!repo) return 'No repository detected';
@@ -33,28 +35,35 @@ const deriveContextIdFromTab = (tab?: chrome.tabs.Tab): string => {
 };
 
 export function App() {
-  const [appState, setAppState] = useState<AppState | null>(null);
+  const { appState, setContextId: setPopupContextId, error, setError } = usePopupState();
+  const [localAppState, setLocalAppState] = useState<AppState | null>(null);
+  const mergedAppState = appState ?? localAppState;
+  const setAppState = (state: AppState | null) => setLocalAppState(state);
   const [repo, setRepo] = useState<RepoRef | null>(null);
   const [notice, setNotice] = useState<string>('Connecting to APItiser worker...');
-  const [error, setError] = useState<string>('');
   const [testDirsInput, setTestDirsInput] = useState<string>('tests, __tests__, test');
   const [openApiFallbackInput, setOpenApiFallbackInput] = useState<string>('');
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [previewOpen, setPreviewOpen] = useState<boolean>(false);
-  const [contextId, setContextId] = useState<string>('global');
+  const [contextId, setContextIdLocal] = useState<string>('global');
   const [selectedEndpointIds, setSelectedEndpointIds] = useState<string[]>([]);
   const [methodFilter, setMethodFilter] = useState<string>('ALL');
   const contextRef = useRef<string>('global');
   const endpointSelectionSeedRef = useRef<string>('');
 
-  const activeOrLatestJob = useMemo(() => {
-    if (!appState) return null;
-    return appState.activeJob ?? appState.jobHistory[0] ?? null;
-  }, [appState]);
+  const setContextId = (id: string) => {
+    setContextIdLocal(id);
+    setPopupContextId(id);
+  };
 
-  const selectedProvider = appState?.settings.provider ?? 'openai';
-  const skipExistingEnabled = appState?.settings.skipExistingTests ?? true;
-  const latestMetric = appState?.metricsHistory?.[0];
+  const activeOrLatestJob = useMemo(() => {
+    if (!mergedAppState) return null;
+    return mergedAppState.activeJob ?? mergedAppState.jobHistory[0] ?? null;
+  }, [mergedAppState]);
+
+  const selectedProvider = mergedAppState?.settings.provider ?? 'openai';
+  const skipExistingEnabled = mergedAppState?.settings.skipExistingTests ?? true;
+  const latestMetric = mergedAppState?.metricsHistory?.[0];
   const endpoints = activeOrLatestJob?.endpoints ?? [];
   const endpointIds = useMemo(() => endpoints.map((endpoint) => endpoint.id), [endpoints]);
   const endpointSignature = useMemo(() => endpointIds.join('|'), [endpointIds]);
@@ -94,61 +103,40 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
-      const nextContextId = await resolveActiveTab(appState?.settings.gitlabBaseUrl);
+      const nextContextId = await resolveActiveTab(mergedAppState?.settings.gitlabBaseUrl);
       await loadInitial(nextContextId);
     })();
 
-    const listener = (message: EventMessage) => {
-      if ('contextId' in message && message.contextId && message.contextId !== contextRef.current) return;
-      if (
-        message.type === 'JOB_PROGRESS' ||
-        message.type === 'JOB_COMPLETE' ||
-        message.type === 'STATE_SNAPSHOT' ||
-        message.type === 'JOB_ERROR' ||
-        message.type === 'SETTINGS_SAVED'
-      ) {
-        setAppState(message.payload);
-      }
-      if (message.type === 'JOB_ERROR') setError(message.error);
-    };
-
     const refreshFromCurrentTab = async () => {
-      const nextContextId = await resolveActiveTab(appState?.settings.gitlabBaseUrl);
+      const nextContextId = await resolveActiveTab(mergedAppState?.settings.gitlabBaseUrl);
       const snapshot = await sendCommand<EventMessage>({ type: 'GET_STATE', contextId: nextContextId });
       if (snapshot.type === 'STATE_SNAPSHOT' && nextContextId === contextRef.current) {
         setAppState(snapshot.payload);
       }
     };
 
-    const handleTabActivated = () => {
-      void refreshFromCurrentTab();
-    };
-
+    const handleTabActivated = () => { void refreshFromCurrentTab(); };
     const handleTabUpdated = (_id: number, info: chrome.tabs.TabChangeInfo) => {
-      if (info.status === 'complete') {
-        void refreshFromCurrentTab();
-      }
+      if (info.status === 'complete') void refreshFromCurrentTab();
     };
 
-    chrome.runtime.onMessage.addListener(listener);
     chrome.tabs.onActivated.addListener(handleTabActivated);
     chrome.tabs.onUpdated.addListener(handleTabUpdated);
     return () => {
-      chrome.runtime.onMessage.removeListener(listener);
       chrome.tabs.onActivated.removeListener(handleTabActivated);
       chrome.tabs.onUpdated.removeListener(handleTabUpdated);
     };
-  }, [appState?.settings.gitlabBaseUrl]);
+  }, [mergedAppState?.settings.gitlabBaseUrl]);
 
   useEffect(() => {
-    if (!appState) return;
-    setTestDirsInput(appState.settings.testDirectories.join(', '));
-  }, [appState?.settings.testDirectories]);
+    if (!mergedAppState) return;
+    setTestDirsInput(mergedAppState.settings.testDirectories.join(', '));
+  }, [mergedAppState?.settings.testDirectories]);
 
   useEffect(() => {
-    if (!appState) return;
-    setOpenApiFallbackInput(appState.settings.openApiFallbackSpec ?? '');
-  }, [appState?.settings.openApiFallbackSpec]);
+    if (!mergedAppState) return;
+    setOpenApiFallbackInput(mergedAppState.settings.openApiFallbackSpec ?? '');
+  }, [mergedAppState?.settings.openApiFallbackSpec]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -187,25 +175,25 @@ export function App() {
   };
 
   const handleCategoryToggle = async (category: TestCategory) => {
-    if (!appState) return;
-    const current = new Set(appState.settings.includeCategories);
+    if (!mergedAppState) return;
+    const current = new Set(mergedAppState.settings.includeCategories);
     current.has(category) ? current.delete(category) : current.add(category);
     const next = [...current];
     await patchSettings({ includeCategories: next.length ? next : ['positive'] });
   };
 
   const persistTestFoldersIfChanged = async () => {
-    if (!appState) return;
+    if (!mergedAppState) return;
     const normalizedDirs = testDirsInput.split(',').map((value) => value.trim()).filter(Boolean);
-    if (normalizedDirs.join('|') !== appState.settings.testDirectories.join('|')) {
+    if (normalizedDirs.join('|') !== mergedAppState.settings.testDirectories.join('|')) {
       await patchSettings({ testDirectories: normalizedDirs });
     }
   };
 
   const persistOpenApiFallbackIfChanged = async () => {
-    if (!appState) return;
+    if (!mergedAppState) return;
     const normalized = openApiFallbackInput.trim();
-    const current = (appState.settings.openApiFallbackSpec ?? '').trim();
+    const current = (mergedAppState.settings.openApiFallbackSpec ?? '').trim();
     if (normalized !== current) await patchSettings({ openApiFallbackSpec: normalized });
   };
 
@@ -285,7 +273,7 @@ export function App() {
   };
 
   const handleDownload = async () => {
-    const artifact = appState?.artifacts?.[0];
+    const artifact = mergedAppState?.artifacts?.[0];
     if (!artifact) { setError('No generated artifact available for download.'); return; }
     const response = await sendCommand<EventMessage>({
       type: 'DOWNLOAD_ARTIFACT',
@@ -307,7 +295,7 @@ export function App() {
   };
 
   const handleExportSettings = () => {
-    if (!appState) return;
+    if (!mergedAppState) return;
     const {
       openAiKey,
       claudeKey,
@@ -320,7 +308,7 @@ export function App() {
       runtimeSessionCookie,
       runtimeSetupSteps,
       ...safe
-    } = appState.settings;
+    } = mergedAppState.settings;
     void openAiKey; void claudeKey; void geminiKey; void githubToken; void gitlabToken;
     void runtimeApiToken; void runtimeApiKey; void runtimeCsrfToken; void runtimeSessionCookie; void runtimeSetupSteps;
     const blob = new Blob([JSON.stringify(safe, null, 2)], { type: 'application/json' });
@@ -356,8 +344,8 @@ export function App() {
   const visibleQualityIssues = qualityIssues.slice(0, 4);
   const qualityStatusLabel = activeOrLatestJob?.qualityStatus ?? (batchDiagnostics.length ? 'pending' : undefined);
   const generatedTests = activeOrLatestJob?.generatedTests ?? [];
-  const readiness = activeOrLatestJob?.readiness ?? appState?.artifacts?.[0]?.readiness;
-  const readinessNotes = activeOrLatestJob?.readinessNotes ?? appState?.artifacts?.[0]?.readinessNotes ?? [];
+  const readiness = activeOrLatestJob?.readiness ?? mergedAppState?.artifacts?.[0]?.readiness;
+  const readinessNotes = activeOrLatestJob?.readinessNotes ?? mergedAppState?.artifacts?.[0]?.readinessNotes ?? [];
 
   return (
     <main className="shell" data-theme="light">
@@ -380,33 +368,55 @@ export function App() {
       {error ? <section className="error-banner">{error}</section> : null}
 
       {settingsOpen ? (
-        <SettingsModal
-          appState={appState}
-          testDirsInput={testDirsInput}
-          openApiFallbackInput={openApiFallbackInput}
-          busy={busy}
-          hasRepo={Boolean(repo)}
-          onClose={() => setSettingsOpen(false)}
-          onPatchSettings={(patch) => void patchSettings(patch)}
-          onTestDirsChange={setTestDirsInput}
-          onOpenApiFallbackChange={setOpenApiFallbackInput}
-          onCategoryToggle={(category) => void handleCategoryToggle(category)}
-          onValidateAccess={() => void handleValidateAccess()}
-          onPersistTestFolders={() => void persistTestFoldersIfChanged()}
-          onPersistOpenApiFallback={() => void persistOpenApiFallbackIfChanged()}
-          onImportOpenApiFile={(file) => void handleImportOpenApiFile(file)}
-          onOpenDoc={(path) => void openExtensionDoc(path)}
-          onExportSettings={handleExportSettings}
-          onImportSettings={(file) => void handleImportSettings(file)}
-        />
+        <ErrorBoundary
+          resetKeys={[settingsOpen]}
+          fallback={(err, retry) => (
+            <div className="error-boundary-fallback" role="alert">
+              <h2>Settings failed to load</h2>
+              <p className="error-boundary-message">{err.message}</p>
+              <button type="button" onClick={() => { retry(); setSettingsOpen(false); }}>Close</button>
+            </div>
+          )}
+        >
+          <SettingsModal
+            appState={mergedAppState}
+            testDirsInput={testDirsInput}
+            openApiFallbackInput={openApiFallbackInput}
+            busy={busy}
+            hasRepo={Boolean(repo)}
+            onClose={() => setSettingsOpen(false)}
+            onPatchSettings={(patch) => void patchSettings(patch)}
+            onTestDirsChange={setTestDirsInput}
+            onOpenApiFallbackChange={setOpenApiFallbackInput}
+            onCategoryToggle={(category) => void handleCategoryToggle(category)}
+            onValidateAccess={() => void handleValidateAccess()}
+            onPersistTestFolders={() => void persistTestFoldersIfChanged()}
+            onPersistOpenApiFallback={() => void persistOpenApiFallbackIfChanged()}
+            onImportOpenApiFile={(file) => void handleImportOpenApiFile(file)}
+            onOpenDoc={(path) => void openExtensionDoc(path)}
+            onExportSettings={handleExportSettings}
+            onImportSettings={(file) => void handleImportSettings(file)}
+          />
+        </ErrorBoundary>
       ) : null}
 
       {previewOpen && generatedTests.length > 0 ? (
-        <TestPreviewModal
-          tests={generatedTests}
-          endpoints={endpoints}
-          onClose={() => setPreviewOpen(false)}
-        />
+        <ErrorBoundary
+          resetKeys={[previewOpen]}
+          fallback={(err, retry) => (
+            <div className="error-boundary-fallback" role="alert">
+              <h2>Preview failed to render</h2>
+              <p className="error-boundary-message">{err.message}</p>
+              <button type="button" onClick={() => { retry(); setPreviewOpen(false); }}>Close</button>
+            </div>
+          )}
+        >
+          <TestPreviewModal
+            tests={generatedTests}
+            endpoints={endpoints}
+            onClose={() => setPreviewOpen(false)}
+          />
+        </ErrorBoundary>
       ) : null}
 
       <ProgressTimeline
@@ -456,7 +466,7 @@ export function App() {
         busy={busy}
         hasRepo={Boolean(repo)}
         hasEndpoints={endpoints.length > 0}
-        hasArtifact={Boolean(appState?.artifacts.length)}
+        hasArtifact={Boolean(mergedAppState?.artifacts.length)}
         skipExistingEnabled={skipExistingEnabled}
         selectedEligibleCount={selectedEligibleCount}
         selectedEndpointCount={selectedEndpointCount}
