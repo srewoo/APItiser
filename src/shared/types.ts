@@ -2,7 +2,7 @@ export type HostPlatform = 'github' | 'gitlab';
 
 export type LLMProvider = 'openai' | 'claude' | 'gemini';
 
-export type TestFramework = 'jest' | 'pytest' | 'mocha';
+export type TestFramework = 'jest' | 'pytest' | 'mocha' | 'supertest' | 'gotest' | 'restassured';
 
 export type TestCategory = 'positive' | 'negative' | 'edge' | 'security';
 

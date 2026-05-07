@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "APItiser",
   "description": "AI-powered API test generation directly in your browser.",
-  "version": "2.0",
+  "version": "2.1",
   "action": {
     "default_title": "APItiser",
     "default_icon": {

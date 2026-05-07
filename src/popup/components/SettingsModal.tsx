@@ -335,8 +335,11 @@ export function SettingsModal({
                 onChange={(event) => onPatchSettings({ framework: event.target.value as AppState['settings']['framework'] })}
               >
                 <option value="jest">Jest</option>
+                <option value="supertest">Jest + Supertest</option>
                 <option value="mocha">Mocha + Chai</option>
                 <option value="pytest">Pytest</option>
+                <option value="gotest">Go (testing)</option>
+                <option value="restassured">JUnit5 + REST Assured</option>
               </select>
             </label>
             <label>
