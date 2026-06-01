@@ -137,10 +137,10 @@ describe('ClaudeAdapter', () => {
       })
     );
 
-    // Batch of 5 endpoints → max_tokens should be max(5*500, 4000) = 4000
+    // Batch of 5 endpoints → max_tokens should be min(max(5*1200, 8000), 16000) = 8000
     const batch = Array.from({ length: 5 }, (_, i) => ({ ...endpoint, id: `GET::/item${i}` }));
     await new ClaudeAdapter().generateTests(batch, context, baseOptions);
-    expect(capturedBody.max_tokens).toBe(4000);
+    expect(capturedBody.max_tokens).toBe(8000);
   });
 });
 

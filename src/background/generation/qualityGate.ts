@@ -1,4 +1,5 @@
 import { buildExamplePath, defaultExpectedStatus } from '@background/llm/endpointUtils';
+import { normalizePath } from '@background/parser/endpointBuilder';
 import { isPlausibleRawTest, parseGeneratedTestCase } from '@shared/schemas';
 import type {
   ApiEndpoint,
@@ -339,6 +340,67 @@ export const assessGeneratedTestQuality = (
   return { passed: !issues.some((issue) => issue.severity === 'error'), issues };
 };
 
+const stripQueryFromPath = (value: string): string => value.split('?')[0];
+
+const methodPathKey = (method: string, path: string): string =>
+  `${method.toUpperCase()} ${normalizePath(stripQueryFromPath(path))}`;
+
+/**
+ * Resolve which endpoint a raw LLM test belongs to. Models frequently fail to echo the
+ * opaque composite `endpointId` ("GET::/api/alerts/config") verbatim — they return a bare
+ * path, "METHOD path", "METHOD::path", or a concrete value for a templated path. A strict
+ * id-only lookup silently discards every such test, leaving zero tests. So fall back to
+ * matching on method + path (exact, then param-template regex) before giving up.
+ */
+const resolveEndpointForRawTest = (
+  source: Record<string, unknown>,
+  endpointsById: Map<string, ApiEndpoint>,
+  endpointsByMethodPath: Map<string, ApiEndpoint>,
+  paramEndpoints: ApiEndpoint[]
+): ApiEndpoint | undefined => {
+  const rawId = String(source.endpointId ?? '');
+  const direct = endpointsById.get(rawId);
+  if (direct) {
+    return direct;
+  }
+
+  const request = isRecord(source.request) ? source.request : {};
+  const reqMethod = typeof request.method === 'string' ? request.method : '';
+  const reqPath = typeof request.path === 'string' ? request.path : '';
+
+  const candidates: Array<{ method: string; path: string }> = [];
+  if (reqMethod && reqPath) {
+    candidates.push({ method: reqMethod, path: reqPath });
+  }
+  // The id itself may carry the route: "METHOD::path", "METHOD path", or a bare "/path".
+  const idParts = rawId.includes('::') ? rawId.split('::') : rawId.split(/\s+/);
+  if (idParts.length === 2 && idParts[0] && idParts[1]) {
+    candidates.push({ method: idParts[0], path: idParts[1] });
+  } else if (rawId.startsWith('/') && reqMethod) {
+    candidates.push({ method: reqMethod, path: rawId });
+  }
+
+  for (const { method, path } of candidates) {
+    const exact = endpointsByMethodPath.get(methodPathKey(method, path));
+    if (exact) {
+      return exact;
+    }
+  }
+
+  // Concrete path values (e.g. "/api/alerts/42/events") against a templated route.
+  for (const { method, path } of candidates) {
+    const cleanPath = stripQueryFromPath(path);
+    const match = paramEndpoints.find(
+      (endpoint) => endpoint.method.toUpperCase() === method.toUpperCase() && endpointPathToRegex(endpoint.path).test(cleanPath)
+    );
+    if (match) {
+      return match;
+    }
+  }
+
+  return undefined;
+};
+
 export const normalizeGeneratedTests = (
   input: unknown,
   allowedCategories: string[],
@@ -349,6 +411,8 @@ export const normalizeGeneratedTests = (
   }
 
   const endpointsById = new Map(endpoints.map((endpoint) => [endpoint.id, endpoint]));
+  const endpointsByMethodPath = new Map(endpoints.map((endpoint) => [methodPathKey(endpoint.method, endpoint.path), endpoint]));
+  const paramEndpoints = endpoints.filter((endpoint) => hasPlaceholders(endpoint.path));
   const seen = new Set<string>();
 
   return input.reduce<GeneratedTestCase[]>((acc, item) => {
@@ -359,9 +423,14 @@ export const normalizeGeneratedTests = (
     }
 
     const source = item as Record<string, unknown>;
-    const endpoint = endpointsById.get(String(source.endpointId ?? ''));
+    const endpoint = resolveEndpointForRawTest(source, endpointsById, endpointsByMethodPath, paramEndpoints);
     if (!endpoint) {
       return acc;
+    }
+    if (endpoint.id !== String(source.endpointId ?? '')) {
+      console.warn(
+        `[APItiser] Matched generated test to ${endpoint.id} via method+path fallback (model returned endpointId="${String(source.endpointId ?? '')}").`
+      );
     }
     const category = String(source.category ?? 'positive');
     const request = (source.request as Record<string, unknown> | undefined) ?? {};

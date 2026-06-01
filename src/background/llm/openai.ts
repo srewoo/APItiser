@@ -1,5 +1,5 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
-import { buildProviderPrompt, buildProviderSystemPrompt, parseProviderOutput } from './promptBuilder';
+import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
 import { withRetry } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
@@ -8,6 +8,7 @@ interface OpenAiResponse {
     message: {
       content: string;
     };
+    finish_reason?: string;
   }>;
 }
 
@@ -40,6 +41,7 @@ export class OpenAiAdapter implements LLMProviderAdapter {
             body: JSON.stringify({
               model: options.model,
               temperature: 0.2,
+              max_tokens: computeMaxOutputTokens(batch.length),
               response_format: { type: 'json_object' },
               messages: [
                 {
@@ -67,6 +69,9 @@ export class OpenAiAdapter implements LLMProviderAdapter {
         }
 
         const json = (await response.json()) as OpenAiResponse;
+        if (json.choices?.[0]?.finish_reason === 'length') {
+          console.warn('[APItiser] OpenAI response hit the output-token limit; tests may be truncated. Reduce batch size for full coverage.');
+        }
         return json.choices?.[0]?.message?.content ?? '';
       },
       { signal: options.signal, retries: 3 }

@@ -1,5 +1,5 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
-import { buildProviderPrompt, buildProviderSystemPrompt, parseProviderOutput } from './promptBuilder';
+import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
 import { withRetry } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
@@ -8,6 +8,7 @@ interface GeminiResponse {
     content?: {
       parts?: Array<{ text?: string }>;
     };
+    finishReason?: string;
   }>;
 }
 
@@ -44,7 +45,8 @@ export class GeminiAdapter implements LLMProviderAdapter {
               },
               generationConfig: {
                 temperature: 0.2,
-                responseMimeType: 'application/json'
+                responseMimeType: 'application/json',
+                maxOutputTokens: computeMaxOutputTokens(batch.length)
               },
               contents: [
                 {
@@ -68,6 +70,9 @@ export class GeminiAdapter implements LLMProviderAdapter {
         }
 
         const json = (await response.json()) as GeminiResponse;
+        if (json.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
+          console.warn('[APItiser] Gemini response hit maxOutputTokens; tests may be truncated. Reduce batch size for full coverage.');
+        }
         const output = json.candidates?.[0]?.content?.parts?.[0]?.text;
         return output ?? '[]';
       },

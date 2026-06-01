@@ -1,5 +1,5 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
-import { buildProviderPrompt, buildProviderSystemPrompt, parseProviderOutput } from './promptBuilder';
+import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
 import { withRetry } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
@@ -8,6 +8,7 @@ interface ClaudeResponse {
     type: string;
     text?: string;
   }>;
+  stop_reason?: string;
 }
 
 export class ClaudeAdapter implements LLMProviderAdapter {
@@ -39,7 +40,7 @@ export class ClaudeAdapter implements LLMProviderAdapter {
             },
             body: JSON.stringify({
               model: options.model,
-              max_tokens: Math.min(Math.max(batch.length * 500, 4000), 16000),
+              max_tokens: computeMaxOutputTokens(batch.length),
               system: systemPrompt,
               messages: [{ role: 'user', content: prompt }]
             })
@@ -58,6 +59,9 @@ export class ClaudeAdapter implements LLMProviderAdapter {
         }
 
         const json = (await response.json()) as ClaudeResponse;
+        if (json.stop_reason === 'max_tokens') {
+          console.warn('[APItiser] Claude response hit max_tokens; tests may be truncated. Reduce batch size for full coverage.');
+        }
         const firstText = json.content.find((item) => item.type === 'text')?.text;
         return firstText ?? '[]';
       },

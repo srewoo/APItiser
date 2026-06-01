@@ -295,7 +295,94 @@ export const buildProviderPrompt = (
   return [providerLead, basePrompt].join('\n');
 };
 
+/**
+ * Output-token budget for a batch. Scales with batch size but is floored high enough
+ * that a single batch's worth of test JSON is unlikely to be truncated, and ceilinged
+ * to a value all three providers support (OpenAI gpt-4o caps completions at 16384).
+ */
+export const computeMaxOutputTokens = (batchLength: number): number =>
+  Math.min(Math.max(batchLength * 1200, 8000), 16000);
+
 const fencedJsonRegex = /```(?:json|javascript|js)?\s*([\s\S]*?)```/gi;
+
+/**
+ * Salvage complete objects from a (possibly truncated) JSON array. When a provider's
+ * response is cut off by the output-token limit, the trailing brace/bracket never
+ * closes, so strict parsing fails. This walks the first array it finds and collects
+ * every fully-formed `{...}` element, discarding only the incomplete trailing one —
+ * so a truncated batch still yields most of its tests instead of being lost entirely.
+ */
+const salvageArrayObjects = (value: string): unknown[] | null => {
+  const arrayStart = value.indexOf('[');
+  if (arrayStart === -1) {
+    return null;
+  }
+
+  const objects: unknown[] = [];
+  let i = arrayStart + 1;
+
+  while (i < value.length) {
+    const ch = value[i];
+    if (ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === ',') {
+      i += 1;
+      continue;
+    }
+    if (ch === ']') {
+      break;
+    }
+    if (ch !== '{') {
+      break;
+    }
+
+    // Find the matching close brace for the object starting at i (string-aware).
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let end = -1;
+    for (let j = i; j < value.length; j += 1) {
+      const c = value[j];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c === '\\') {
+        escape = true;
+        continue;
+      }
+      if (c === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) {
+        continue;
+      }
+      if (c === '{') {
+        depth += 1;
+      } else if (c === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = j;
+          break;
+        }
+      }
+    }
+
+    if (end === -1) {
+      // Truncated mid-object — stop; everything collected so far is still valid.
+      break;
+    }
+
+    const objectText = value.slice(i, end + 1);
+    try {
+      objects.push(JSON.parse(stripTrailingCommas(objectText)));
+    } catch {
+      // Skip an unparseable object but keep going.
+    }
+    i = end + 1;
+  }
+
+  return objects.length ? objects : null;
+};
 
 const interpretParsed = (parsed: unknown): unknown[] | null => {
   if (Array.isArray(parsed)) {
@@ -418,5 +505,14 @@ export const parseProviderOutput = (value: string): unknown[] => {
     }
   }
 
-  throw new Error('Provider output was not a tests array or object');
+  // 4. Last resort: salvage complete objects from a truncated array. Recovers most
+  //    tests when the response was cut off by the provider's output-token limit.
+  const salvaged = salvageArrayObjects(value);
+  if (salvaged) {
+    return salvaged;
+  }
+
+  throw new Error(
+    'Provider output was not a tests array or object (response may have been truncated — try reducing batch size in Settings)'
+  );
 };

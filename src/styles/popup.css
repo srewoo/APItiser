@@ -464,6 +464,20 @@ textarea:focus {
   opacity: 0.75;
 }
 
+.endpoint-label {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.endpoint-source {
+  font-size: 10px;
+  color: var(--muted, #8a8275);
+  opacity: 0.8;
+}
+
 .endpoint-badges {
   display: inline-flex;
   align-items: center;
