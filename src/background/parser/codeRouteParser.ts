@@ -3,7 +3,17 @@ import type { Expression, File, ObjectExpression } from '@babel/types';
 import traverse from '@babel/traverse';
 import * as t from '@babel/types';
 import type { ApiEndpoint, RepoFile } from '@shared/types';
-import { buildEndpoint, clampConfidence, joinPath, makeEvidence, normalizePath } from './endpointBuilder';
+import {
+  buildEndpoint,
+  clampConfidence,
+  exampleFromSchema,
+  joinPath,
+  makeBodySchema,
+  makeEvidence,
+  normalizePath,
+  sampleForType
+} from './endpointBuilder';
+import type { SchemaField, SchemaObject } from '@shared/types';
 import { parsePythonRoutes } from './languages/python';
 import { parseGoRoutes } from './languages/go';
 import { parseSpringRoutes } from './languages/java';
@@ -323,6 +333,10 @@ const routeFromObjectPattern = (
     return;
   }
 
+  // fastify.route({ schema: { body, querystring }, handler }) — recover signals
+  // from both the schema option object and any inline handler function.
+  const { body, queryParams } = extractRouteCallSignals([firstArg], values);
+
   for (const method of methods) {
     if (!HTTP_METHODS.has(method)) {
       continue;
@@ -334,7 +348,9 @@ const routeFromObjectPattern = (
       source: 'fastify',
       file,
       confidence: 0.95,
-      evidence: [makeEvidence(file, 'fastify.route() declaration', expression.start ?? undefined)]
+      evidence: [makeEvidence(file, 'fastify.route() declaration', expression.start ?? undefined)],
+      body,
+      queryParams
     });
   }
 };
@@ -381,6 +397,8 @@ const routeFromChainedRouteCall = (
     return;
   }
 
+  const { body, queryParams } = extractRouteCallSignals(expression.arguments, values);
+
   routes.push({
     method: chainedMethod,
     path: normalizePath(routePath),
@@ -388,8 +406,496 @@ const routeFromChainedRouteCall = (
     source,
     file,
     confidence: 0.93,
-    evidence: [makeEvidence(file, `express chained route ${chainedMethod}`, expression.start ?? undefined)]
+    evidence: [makeEvidence(file, `express chained route ${chainedMethod}`, expression.start ?? undefined)],
+    body,
+    queryParams
   });
+};
+
+interface HandlerSignals {
+  bodyFields: Map<string, { type?: string; format?: string; required?: boolean }>;
+  queryNames: Set<string>;
+}
+
+const newHandlerSignals = (): HandlerSignals => ({
+  bodyFields: new Map(),
+  queryNames: new Set()
+});
+
+const hasSignals = (signals: HandlerSignals): boolean =>
+  signals.bodyFields.size > 0 || signals.queryNames.size > 0;
+
+/** Returns the chain of property names for a member expression like a.b.c -> ['a','b','c']. */
+const memberChain = (node: t.Node): string[] | null => {
+  if (t.isIdentifier(node)) {
+    return [node.name];
+  }
+  if (t.isMemberExpression(node) && !node.computed) {
+    const base = memberChain(node.object);
+    const prop = getPropName(node.property);
+    if (base && prop) {
+      return [...base, prop];
+    }
+  }
+  return null;
+};
+
+/**
+ * Detects whether a member chain (string segments) ends in `.body` / `.query`
+ * for the common Express/Koa accessors. Returns the kind and the trailing
+ * field name if the chain references a specific property.
+ */
+const classifyAccessor = (
+  chain: string[]
+): { kind: 'body' | 'query'; field?: string } | null => {
+  // Find the last occurrence of 'body' or 'query' that follows req/request/ctx-like roots.
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const segment = chain[i];
+    if (segment !== 'body' && segment !== 'query') {
+      continue;
+    }
+    const prev = chain[i - 1];
+    // req.body / request.body / ctx.request.body (prev === request) / state etc.
+    if (prev === 'req' || prev === 'request') {
+      const field = chain[i + 1];
+      return { kind: segment as 'body' | 'query', field };
+    }
+  }
+  return null;
+};
+
+/** Collect names destructured out of an ObjectPattern (const { a, b } = ...). */
+const namesFromObjectPattern = (pattern: t.ObjectPattern): string[] => {
+  const names: string[] = [];
+  for (const prop of pattern.properties) {
+    if (t.isObjectProperty(prop)) {
+      const name = getPropName(prop.key);
+      if (name) {
+        names.push(name);
+      }
+    } else if (t.isRestElement(prop) && t.isIdentifier(prop.argument)) {
+      names.push(prop.argument.name);
+    }
+  }
+  return names;
+};
+
+/**
+ * Walk a handler function body and recover body/query signals from:
+ *  - destructuring: const { a, b } = req.body / req.query / ctx.request.body
+ *  - member access: req.body.field / req.query.field
+ *  - Hono: c.req.query('x'), const { a } = await c.req.json()
+ */
+const extractHandlerSignals = (handler: t.Node, signals: HandlerSignals): void => {
+  try {
+    const body = (handler as { body?: t.Node }).body;
+    if (!body) {
+      return;
+    }
+
+    const visit = (node: t.Node | null | undefined): void => {
+      if (!node || typeof node !== 'object') {
+        return;
+      }
+
+      // const { a, b } = <something that resolves to body/query/json>
+      if (t.isVariableDeclarator(node) && t.isObjectPattern(node.id) && node.init) {
+        const init = node.init;
+        const inner = t.isAwaitExpression(init) ? init.argument : init;
+
+        // Hono: await c.req.json()
+        if (
+          t.isCallExpression(inner) &&
+          t.isMemberExpression(inner.callee) &&
+          getPropName(inner.callee.property) === 'json'
+        ) {
+          const calleeChain = memberChain(inner.callee.object);
+          if (calleeChain && calleeChain.includes('req')) {
+            for (const name of namesFromObjectPattern(node.id)) {
+              if (!signals.bodyFields.has(name)) {
+                signals.bodyFields.set(name, { required: true });
+              }
+            }
+          }
+        }
+
+        // const { a } = req.body / req.query / ctx.request.body
+        const chain = memberChain(inner);
+        if (chain) {
+          const classified = classifyAccessor(chain);
+          if (classified && classified.field === undefined) {
+            for (const name of namesFromObjectPattern(node.id)) {
+              if (classified.kind === 'body') {
+                if (!signals.bodyFields.has(name)) {
+                  signals.bodyFields.set(name, { required: true });
+                }
+              } else {
+                signals.queryNames.add(name);
+              }
+            }
+          }
+        }
+      }
+
+      // member access: req.body.field / req.query.field
+      if (t.isMemberExpression(node) && !node.computed) {
+        const chain = memberChain(node);
+        if (chain) {
+          const classified = classifyAccessor(chain);
+          if (classified && classified.field) {
+            if (classified.kind === 'body') {
+              if (!signals.bodyFields.has(classified.field)) {
+                signals.bodyFields.set(classified.field, { required: true });
+              }
+            } else {
+              signals.queryNames.add(classified.field);
+            }
+          }
+        }
+      }
+
+      // Hono: c.req.query('x')
+      if (
+        t.isCallExpression(node) &&
+        t.isMemberExpression(node.callee) &&
+        getPropName(node.callee.property) === 'query'
+      ) {
+        const calleeChain = memberChain(node.callee.object);
+        if (calleeChain && calleeChain.includes('req')) {
+          const arg = node.arguments[0];
+          if (arg && t.isStringLiteral(arg)) {
+            signals.queryNames.add(arg.value);
+          }
+        }
+      }
+
+      // Recurse into children.
+      for (const key of Object.keys(node) as Array<keyof typeof node>) {
+        if (key === 'loc' || key === 'start' || key === 'end' || key === 'leadingComments' || key === 'trailingComments') {
+          continue;
+        }
+        const value = (node as unknown as Record<string, unknown>)[key as string];
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            if (item && typeof item === 'object' && 'type' in item) {
+              visit(item as t.Node);
+            }
+          }
+        } else if (value && typeof value === 'object' && 'type' in (value as object)) {
+          visit(value as t.Node);
+        }
+      }
+    };
+
+    visit(body);
+  } catch {
+    // Defensive: AST shapes vary; never throw out of the analyzer.
+  }
+};
+
+/** Convert collected handler signals into RouteSignal body/queryParams fields. */
+const signalsToRouteFields = (
+  signals: HandlerSignals
+): { body?: SchemaObject; queryParams?: SchemaField[] } => {
+  const result: { body?: SchemaObject; queryParams?: SchemaField[] } = {};
+
+  if (signals.bodyFields.size > 0) {
+    const fields = [...signals.bodyFields.entries()].map(([name, meta]) => ({
+      name,
+      type: meta.type ?? 'string',
+      required: meta.required ?? true,
+      format: meta.format
+    }));
+    const body = makeBodySchema(fields);
+    if (body) {
+      result.body = body;
+    }
+  }
+
+  if (signals.queryNames.size > 0) {
+    result.queryParams = [...signals.queryNames].map((name) => ({
+      name,
+      required: false,
+      type: 'string'
+    }));
+  }
+
+  return result;
+};
+
+/** Find the handler function node among a route call's arguments (skips the path arg). */
+const findHandlerNode = (args: ReadonlyArray<t.Node>): t.Node | undefined => {
+  for (const arg of args) {
+    if (t.isArrowFunctionExpression(arg) || t.isFunctionExpression(arg)) {
+      return arg;
+    }
+  }
+  return undefined;
+};
+
+/** Map a JSON-schema-ish type expression to our primitive type string. */
+const jsonSchemaType = (expr: t.Expression | undefined, values: Map<string, string>): string | undefined => {
+  const raw = expr ? toStringValue(expr, values) : undefined;
+  if (!raw) {
+    return undefined;
+  }
+  const normalized = raw.toLowerCase();
+  if (['string', 'number', 'integer', 'boolean', 'object', 'array'].includes(normalized)) {
+    return normalized === 'integer' ? 'integer' : normalized;
+  }
+  return undefined;
+};
+
+/** Read `properties: { name: { type: 'string' }, ... }` and `required: [...]` from a JSON schema object literal. */
+const fieldsFromJsonSchemaObject = (schemaObj: t.ObjectExpression, values: Map<string, string>): Array<{ name: string; type?: string; required?: boolean }> => {
+  const props = collectObjectProperties(schemaObj);
+  const propertiesExpr = props.get('properties');
+  const requiredExpr = props.get('required');
+
+  const requiredNames = new Set<string>();
+  if (requiredExpr && t.isArrayExpression(requiredExpr)) {
+    for (const element of requiredExpr.elements) {
+      if (element && t.isStringLiteral(element)) {
+        requiredNames.add(element.value);
+      }
+    }
+  }
+
+  const fields: Array<{ name: string; type?: string; required?: boolean }> = [];
+  if (propertiesExpr && t.isObjectExpression(propertiesExpr)) {
+    const propMap = collectObjectProperties(propertiesExpr);
+    for (const [name, valueExpr] of propMap.entries()) {
+      let type: string | undefined;
+      if (t.isObjectExpression(valueExpr)) {
+        const fieldProps = collectObjectProperties(valueExpr);
+        type = jsonSchemaType(fieldProps.get('type'), values);
+      }
+      fields.push({ name, type: type ?? 'string', required: requiredNames.has(name) });
+    }
+  }
+  return fields;
+};
+
+/**
+ * Fastify route options: { schema: { body: {...}, querystring: {...} } }.
+ * Best-effort mapping into body + queryParams.
+ */
+const extractFastifySchemaOption = (
+  args: ReadonlyArray<t.Node>,
+  values: Map<string, string>
+): { body?: SchemaObject; queryParams?: SchemaField[] } => {
+  const result: { body?: SchemaObject; queryParams?: SchemaField[] } = {};
+  try {
+    for (const arg of args) {
+      if (!t.isObjectExpression(arg)) {
+        continue;
+      }
+      const optionProps = collectObjectProperties(arg);
+      const schemaExpr = optionProps.get('schema');
+      if (!schemaExpr || !t.isObjectExpression(schemaExpr)) {
+        continue;
+      }
+      const schemaProps = collectObjectProperties(schemaExpr);
+
+      const bodyExpr = schemaProps.get('body');
+      if (bodyExpr && t.isObjectExpression(bodyExpr)) {
+        const body = makeBodySchema(fieldsFromJsonSchemaObject(bodyExpr, values));
+        if (body) {
+          result.body = body;
+        }
+      }
+
+      const queryExpr = schemaProps.get('querystring') ?? schemaProps.get('query');
+      if (queryExpr && t.isObjectExpression(queryExpr)) {
+        const queryFields = fieldsFromJsonSchemaObject(queryExpr, values);
+        if (queryFields.length) {
+          result.queryParams = queryFields.map((f) => ({
+            name: f.name,
+            required: f.required ?? false,
+            type: f.type ?? 'string'
+          }));
+        }
+      }
+    }
+  } catch {
+    // Defensive.
+  }
+  return result;
+};
+
+/**
+ * Inspect a route call expression's arguments to recover body/query signals
+ * from the handler function and/or a Fastify schema option object.
+ */
+const extractRouteCallSignals = (
+  args: ReadonlyArray<t.Node>,
+  values: Map<string, string>
+): { body?: SchemaObject; queryParams?: SchemaField[] } => {
+  const merged: { body?: SchemaObject; queryParams?: SchemaField[] } = {};
+
+  try {
+    const handler = findHandlerNode(args);
+    if (handler) {
+      const signals = newHandlerSignals();
+      extractHandlerSignals(handler, signals);
+      if (hasSignals(signals)) {
+        const fields = signalsToRouteFields(signals);
+        if (fields.body) {
+          merged.body = fields.body;
+        }
+        if (fields.queryParams) {
+          merged.queryParams = fields.queryParams;
+        }
+      }
+    }
+
+    const fastify = extractFastifySchemaOption(args, values);
+    if (fastify.body && !merged.body) {
+      merged.body = fastify.body;
+    }
+    if (fastify.queryParams && !merged.queryParams) {
+      merged.queryParams = fastify.queryParams;
+    }
+  } catch {
+    // Defensive.
+  }
+
+  return merged;
+};
+
+/** Map a TS type annotation node to our primitive type string. */
+const tsTypeToPrimitive = (annotation: t.Node | null | undefined): string | undefined => {
+  if (!annotation) {
+    return undefined;
+  }
+  const node = t.isTSTypeAnnotation(annotation) ? annotation.typeAnnotation : annotation;
+  if (t.isTSStringKeyword(node)) {
+    return 'string';
+  }
+  if (t.isTSNumberKeyword(node)) {
+    return 'number';
+  }
+  if (t.isTSBooleanKeyword(node)) {
+    return 'boolean';
+  }
+  if (t.isTSArrayType(node)) {
+    return 'array';
+  }
+  return undefined;
+};
+
+/** Extract class properties as body fields from an in-file DTO class declaration. */
+const fieldsFromDtoClass = (
+  classNode: t.ClassDeclaration
+): Array<{ name: string; type?: string; required?: boolean }> => {
+  const fields: Array<{ name: string; type?: string; required?: boolean }> = [];
+  try {
+    for (const member of classNode.body.body) {
+      if (!t.isClassProperty(member)) {
+        continue;
+      }
+      const name = getPropName(member.key);
+      if (!name) {
+        continue;
+      }
+      const type = tsTypeToPrimitive(member.typeAnnotation) ?? 'string';
+      // optional property (name?: ...) => not required
+      const optional = Boolean((member as { optional?: boolean }).optional);
+      fields.push({ name, type, required: !optional });
+    }
+  } catch {
+    // Defensive.
+  }
+  return fields;
+};
+
+/** Read the decorator name (e.g. `Body`, `Query`, `Param`) from a param decorator. */
+const decoratorName = (decorator: t.Decorator): string | null => {
+  const expr = decorator.expression;
+  if (t.isCallExpression(expr) && t.isIdentifier(expr.callee)) {
+    return expr.callee.name;
+  }
+  if (t.isIdentifier(expr)) {
+    return expr.name;
+  }
+  return null;
+};
+
+/** First string-literal argument of a decorator call, if any (e.g. @Query('q')). */
+const decoratorStringArg = (decorator: t.Decorator): string | undefined => {
+  const expr = decorator.expression;
+  if (t.isCallExpression(expr) && expr.arguments[0] && t.isStringLiteral(expr.arguments[0])) {
+    return expr.arguments[0].value;
+  }
+  return undefined;
+};
+
+/** TS type-reference name of a parameter (e.g. CreateUserDto), if it is a simple identifier ref. */
+const paramTypeName = (param: t.Node): string | undefined => {
+  const typeAnnotation = (param as { typeAnnotation?: t.TSTypeAnnotation | null }).typeAnnotation;
+  if (typeAnnotation && t.isTSTypeAnnotation(typeAnnotation) && t.isTSTypeReference(typeAnnotation.typeAnnotation)) {
+    const typeName = typeAnnotation.typeAnnotation.typeName;
+    if (t.isIdentifier(typeName)) {
+      return typeName.name;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Recover body/query/path signals from a NestJS controller method's decorated
+ * parameters (@Body, @Query, @Param), resolving in-file DTO classes for bodies.
+ */
+const extractNestParamSignals = (
+  method: t.ClassMethod,
+  dtoClasses: Map<string, t.ClassDeclaration>
+): { body?: SchemaObject; queryParams?: SchemaField[]; pathParams?: SchemaField[] } => {
+  const result: { body?: SchemaObject; queryParams?: SchemaField[]; pathParams?: SchemaField[] } = {};
+  const queryParams: SchemaField[] = [];
+  const pathParams: SchemaField[] = [];
+
+  try {
+    for (const param of method.params) {
+      const decorators = (param as { decorators?: t.Decorator[] | null }).decorators;
+      if (!decorators?.length) {
+        continue;
+      }
+      for (const decorator of decorators) {
+        const name = decoratorName(decorator);
+        if (name === 'Body') {
+          const typeName = paramTypeName(param);
+          const dtoClass = typeName ? dtoClasses.get(typeName) : undefined;
+          if (dtoClass) {
+            const fields = fieldsFromDtoClass(dtoClass);
+            const body = makeBodySchema(fields);
+            result.body = body ?? { type: 'object' };
+          } else {
+            result.body = { type: 'object' };
+          }
+        } else if (name === 'Query') {
+          const argName = decoratorStringArg(decorator);
+          if (argName) {
+            queryParams.push({ name: argName, required: false, type: 'string' });
+          }
+        } else if (name === 'Param') {
+          const argName = decoratorStringArg(decorator);
+          if (argName) {
+            pathParams.push({ name: argName, required: true, type: 'string' });
+          }
+        }
+      }
+    }
+  } catch {
+    // Defensive.
+  }
+
+  if (queryParams.length) {
+    result.queryParams = queryParams;
+  }
+  if (pathParams.length) {
+    result.pathParams = pathParams;
+  }
+  return result;
 };
 
 const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | null => {
@@ -409,6 +915,27 @@ const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | nu
   const mounts: MountSignal[] = [];
   const namedExports = new Map<string, string>();
   let defaultExportOwner: string | undefined;
+
+  // Pre-collect in-file class declarations so NestJS @Body() DTOs can be resolved
+  // regardless of declaration order relative to the controller.
+  const dtoClasses = new Map<string, t.ClassDeclaration>();
+  try {
+    for (const statement of ast.program.body) {
+      if (t.isClassDeclaration(statement) && statement.id) {
+        dtoClasses.set(statement.id.name, statement);
+      }
+      if (
+        t.isExportNamedDeclaration(statement) &&
+        statement.declaration &&
+        t.isClassDeclaration(statement.declaration) &&
+        statement.declaration.id
+      ) {
+        dtoClasses.set(statement.declaration.id.name, statement.declaration);
+      }
+    }
+  } catch {
+    // Defensive.
+  }
 
   const pushRoute = (route: RouteSignal) => {
     if (!HTTP_METHODS.has(route.method.toUpperCase())) {
@@ -591,6 +1118,7 @@ const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | nu
         }
         const suffix = toStringValue(routeDecorator.expression.arguments[0] as Expression | undefined, values) ?? '';
         const fullPath = joinPath(prefix, suffix);
+        const { body, queryParams, pathParams } = extractNestParamSignals(member, dtoClasses);
         pushRoute({
           method,
           path: fullPath,
@@ -598,7 +1126,10 @@ const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | nu
           owner: path.node.id?.name ?? 'controller',
           file,
           confidence: 0.95,
-          evidence: [makeEvidence(file, `NestJS @${routeDecorator.expression.callee.name} route`, member.start ?? undefined)]
+          evidence: [makeEvidence(file, `NestJS @${routeDecorator.expression.callee.name} route`, member.start ?? undefined)],
+          body,
+          queryParams,
+          pathParams
         });
       }
     },
@@ -669,6 +1200,7 @@ const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | nu
 
       const routeEvidence = makeEvidence(file, `${source} ${methodName.toUpperCase()} route`, expression.start ?? undefined);
       const confidence = source === 'express' || source === 'fastify' || source === 'koa' || source === 'hono' ? 0.9 : 0.85;
+      const { body, queryParams } = extractRouteCallSignals(expression.arguments, values);
       pushRoute({
         method: methodName.toUpperCase(),
         path: routePath,
@@ -676,7 +1208,9 @@ const analyzeJsFile = (file: RepoFile, allPaths: Set<string>): FileAnalysis | nu
         source,
         file,
         confidence,
-        evidence: [routeEvidence]
+        evidence: [routeEvidence],
+        body,
+        queryParams
       });
     }
   });
@@ -896,6 +1430,18 @@ const toApiEndpoints = (signals: RouteSignal[]): ApiEndpoint[] => {
     }
     seen.add(key);
     const { auth, authHints } = inferAuthMetadata(signal.file.content);
+    const authHeaders = authHints?.length
+      ? Object.fromEntries(
+          authHints
+            .filter((hint) => hint.headerName)
+            .map((hint) => [hint.headerName!, hint.type === 'apiKey' ? '{{API_KEY}}' : 'Bearer {{API_TOKEN}}'])
+        )
+      : undefined;
+    const exampleQuery = signal.queryParams?.length
+      ? Object.fromEntries(signal.queryParams.map((param) => [param.name, param.example ?? sampleForType(param.type)]))
+      : undefined;
+    const exampleBody = signal.body ? exampleFromSchema(signal.body) : undefined;
+    const hasExample = Boolean(authHeaders || exampleQuery || exampleBody !== undefined);
     endpoints.push(
       buildEndpoint({
         method: signal.method,
@@ -906,17 +1452,20 @@ const toApiEndpoints = (signals: RouteSignal[]): ApiEndpoint[] => {
         authHints,
         confidence: signal.confidence,
         evidence: signal.evidence,
-        examples: authHints?.length
+        summary: signal.summary,
+        pathParams: signal.pathParams,
+        queryParams: signal.queryParams,
+        body: signal.body,
+        responses: signal.responses,
+        examples: hasExample
           ? [{
               origin: 'code',
               request: {
-                headers: Object.fromEntries(
-                  authHints
-                    .filter((hint) => hint.headerName)
-                    .map((hint) => [hint.headerName!, hint.type === 'apiKey' ? '{{API_KEY}}' : 'Bearer {{API_TOKEN}}'])
-                )
+                ...(authHeaders ? { headers: authHeaders } : {}),
+                ...(exampleQuery ? { query: exampleQuery } : {}),
+                ...(exampleBody !== undefined ? { body: exampleBody } : {})
               },
-              note: 'Auth/session example inferred from source code.'
+              note: 'Request shape inferred from source code.'
             }]
           : undefined
       })

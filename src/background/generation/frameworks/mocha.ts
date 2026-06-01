@@ -201,11 +201,19 @@ ${readinessNotes}`
     return [
       {
         path: '.mocharc.json',
-        content: `{\n  \"spec\": \"tests/**/*.spec.js\",\n  \"timeout\": 30000\n}\n`
+        content: `${JSON.stringify({
+          spec: 'tests/**/*.spec.js',
+          timeout: 30000
+        }, null, 2)}\n`
       },
       {
         path: 'package.json',
-        content: `{\n  \"name\": \"apitiser-generated-tests\",\n  \"private\": true,\n  \"scripts\": {\n    \"test\": \"mocha \\\"tests/**/*.spec.js\\\"\"\n  },\n  \"devDependencies\": {\n    \"chai\": \"^4.5.0\",\n    \"mocha\": \"^10.7.3\",\n    \"undici\": \"^7.16.0\"\n  }\n}\n`
+        content: `${JSON.stringify({
+          name: 'apitiser-generated-tests',
+          private: true,
+          scripts: { test: 'mocha "tests/**/*.spec.js"' },
+          devDependencies: { chai: '^4.5.0', mocha: '^10.7.3', undici: '^7.16.0' }
+        }, null, 2)}\n`
       }
     ];
   }

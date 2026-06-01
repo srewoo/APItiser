@@ -9,7 +9,6 @@ import {
 import type {
   ApiEndpoint,
   BatchGenerationDiagnostics,
-  BatchQualityAssessment,
   ExtensionSettings,
   GeneratedFile,
   GeneratedTestCase,

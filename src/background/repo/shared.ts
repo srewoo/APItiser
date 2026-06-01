@@ -32,7 +32,7 @@ export const shouldExcludePath = (path: string): boolean =>
  * Scores a file/directory path by relevance to API route detection.
  * Higher score = more likely to contain API routes.
  */
-// eslint-disable-next-line no-useless-escape
+ 
 export const rankPath = (path: string): number => {
   let score = 0;
   const lower = path.toLowerCase();

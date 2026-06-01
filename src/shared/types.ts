@@ -2,7 +2,15 @@ export type HostPlatform = 'github' | 'gitlab';
 
 export type LLMProvider = 'openai' | 'claude' | 'gemini';
 
-export type TestFramework = 'jest' | 'pytest' | 'mocha' | 'supertest' | 'gotest' | 'restassured';
+export type TestFramework =
+  | 'jest'
+  | 'pytest'
+  | 'mocha'
+  | 'supertest'
+  | 'gotest'
+  | 'restassured'
+  | 'vitest'
+  | 'playwright';
 
 export type TestCategory = 'positive' | 'negative' | 'edge' | 'security';
 
@@ -24,8 +32,14 @@ export type EndpointSource =
   | 'nextjs'
   | 'fastapi'
   | 'flask'
+  | 'django'
   | 'spring'
-  | 'gin';
+  | 'jaxrs'
+  | 'gin'
+  | 'chi'
+  | 'echo'
+  | 'mux'
+  | 'nethttp';
 
 export type AuthType = 'bearer' | 'apiKey' | 'cookieSession' | 'oauth2' | 'csrf' | 'none' | 'unknown';
 
@@ -399,6 +413,8 @@ export interface JobState {
   validationSummary?: ValidationSummary;
   readiness?: ReadinessState;
   readinessNotes?: string[];
+  /** Framework suggested from the detected route sources (advisory; does not override settings). */
+  suggestedFramework?: TestFramework;
 }
 
 export interface AppState {

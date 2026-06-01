@@ -1,4 +1,5 @@
 import { buildExamplePath, defaultExpectedStatus } from '@background/llm/endpointUtils';
+import { isPlausibleRawTest, parseGeneratedTestCase } from '@shared/schemas';
 import type {
   ApiEndpoint,
   BatchQualityAssessment,
@@ -78,8 +79,12 @@ export const endpointPathToRegex = (path: string): RegExp => {
     .replace(/\{[^}]+\}/g, '\x00PARAM\x00')
     .replace(/:\w+/g, '\x00PARAM\x00');
   const escaped = substituted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // NUL (\x00) is used as a sentinel that cannot occur in a real URL path, so the
+  // param/wildcard markers survive the escape step above without being mangled.
   const final = escaped
+    // eslint-disable-next-line no-control-regex
     .replace(/\x00WILD\x00/g, '.+')
+    // eslint-disable-next-line no-control-regex
     .replace(/\x00PARAM\x00/g, '[^/]+');
   return new RegExp(`^${final}$`, 'i');
 };
@@ -347,7 +352,9 @@ export const normalizeGeneratedTests = (
   const seen = new Set<string>();
 
   return input.reduce<GeneratedTestCase[]>((acc, item) => {
-    if (!item || typeof item !== 'object') {
+    // Reject structurally-implausible raw items (non-object request/expected, etc.)
+    // before attempting to coerce them into a usable test case.
+    if (!isPlausibleRawTest(item)) {
       return acc;
     }
 
@@ -413,9 +420,13 @@ export const normalizeGeneratedTests = (
       normalized.expected.status
     ].join('|');
 
-    if (!seen.has(key)) {
+    // Final guard: only emit tests that conform to the strict GeneratedTestCase schema.
+    // Normalization fills defaults, so this should always pass — but it makes the
+    // contract explicit and drops anything malformed instead of shipping it downstream.
+    const validated = parseGeneratedTestCase(normalized);
+    if (validated && !seen.has(key)) {
       seen.add(key);
-      acc.push(normalized);
+      acc.push(validated);
     }
     return acc;
   }, []);

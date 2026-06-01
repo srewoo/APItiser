@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fetchGitLabRepoFiles } from '@background/repo/gitlab';
 import type { RepoRef } from '@shared/types';
 

@@ -5,6 +5,8 @@ import { PytestFrameworkAdapter } from './pytest';
 import { SupertestFrameworkAdapter } from './supertest';
 import { GoTestFrameworkAdapter } from './gotest';
 import { RestAssuredFrameworkAdapter } from './restassured';
+import { VitestFrameworkAdapter } from './vitest';
+import { PlaywrightFrameworkAdapter } from './playwright';
 
 const adapters: Record<TestFramework, TestFrameworkAdapter> = {
   jest: new JestFrameworkAdapter(),
@@ -12,7 +14,9 @@ const adapters: Record<TestFramework, TestFrameworkAdapter> = {
   pytest: new PytestFrameworkAdapter(),
   supertest: new SupertestFrameworkAdapter(),
   gotest: new GoTestFrameworkAdapter(),
-  restassured: new RestAssuredFrameworkAdapter()
+  restassured: new RestAssuredFrameworkAdapter(),
+  vitest: new VitestFrameworkAdapter(),
+  playwright: new PlaywrightFrameworkAdapter()
 };
 
 export const getFrameworkAdapter = (framework: TestFramework): TestFrameworkAdapter => adapters[framework];

@@ -1,4 +1,15 @@
-import type { JobState, RunMetric } from '@shared/types';
+import type { JobState, RunMetric, TestFramework } from '@shared/types';
+
+const FRAMEWORK_LABELS: Record<TestFramework, string> = {
+  jest: 'Jest',
+  mocha: 'Mocha + Chai',
+  supertest: 'Supertest',
+  pytest: 'Pytest',
+  gotest: 'Go testing',
+  restassured: 'REST Assured',
+  vitest: 'Vitest',
+  playwright: 'Playwright'
+};
 
 const formatMs = (value?: number): string => {
   if (!value && value !== 0) return '—';
@@ -8,9 +19,12 @@ const formatMs = (value?: number): string => {
 
 interface CoveragePanelProps {
   activeOrLatestJob: JobState | null;
+  selectedFramework?: TestFramework;
 }
 
-export function CoveragePanel({ activeOrLatestJob }: CoveragePanelProps) {
+export function CoveragePanel({ activeOrLatestJob, selectedFramework }: CoveragePanelProps) {
+  const suggested = activeOrLatestJob?.suggestedFramework;
+  const showSuggestion = Boolean(suggested && suggested !== selectedFramework);
   return (
     <section className="panel">
       <h2>Coverage Snapshot</h2>
@@ -48,6 +62,9 @@ export function CoveragePanel({ activeOrLatestJob }: CoveragePanelProps) {
         ) : null}
         {activeOrLatestJob?.readiness ? (
           <p>Readiness: {activeOrLatestJob.readiness.replace(/_/g, ' ')}</p>
+        ) : null}
+        {showSuggestion && suggested ? (
+          <p>Suggested framework for detected stack: {FRAMEWORK_LABELS[suggested]}</p>
         ) : null}
       </div>
     </section>

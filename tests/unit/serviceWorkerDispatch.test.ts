@@ -117,7 +117,7 @@ describe('service-worker message dispatch', () => {
   // -------------------------------------------------------------------------
 
   it('SAVE_SETTINGS calls updateSettings and responds with SETTINGS_SAVED', async () => {
-    const { updateSettings, loadState } = await import('@background/core/stateManager');
+    const { updateSettings } = await import('@background/core/stateManager');
     const { emitStateSnapshot } = await import('@background/core/emitter');
     const newSettings = makeSettings({ framework: 'mocha' });
     const sendResponse = vi.fn<(response: EventMessage) => void>();

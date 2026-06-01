@@ -130,7 +130,12 @@ ${readinessNotes}`
       },
       {
         path: 'package.json',
-        content: `{\n  \"name\": \"apitiser-generated-tests\",\n  \"private\": true,\n  \"scripts\": {\n    \"test\": \"jest tests\"\n  },\n  \"devDependencies\": {\n    \"jest\": \"^29.7.0\",\n    \"supertest\": \"^7.0.0\"\n  }\n}\n`
+        content: `${JSON.stringify({
+          name: 'apitiser-generated-tests',
+          private: true,
+          scripts: { test: 'jest tests' },
+          devDependencies: { jest: '^29.7.0', supertest: '^7.0.0' }
+        }, null, 2)}\n`
       }
     ];
   }

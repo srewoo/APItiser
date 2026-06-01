@@ -6,7 +6,7 @@ import type {
   QualityIssue,
   TestCategory
 } from '@shared/types';
-import { buildExamplePath, defaultExpectedStatus, METHOD_DEFAULTS, sampleValueForField } from './endpointUtils';
+import { buildExamplePath, defaultExpectedStatus, sampleValueForField } from './endpointUtils';
 
 // METHOD_DEFAULTS, sampleValueForField, buildExamplePath, defaultExpectedStatus
 // are imported from './endpointUtils' above.

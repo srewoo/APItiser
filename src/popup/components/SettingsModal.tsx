@@ -340,6 +340,8 @@ export function SettingsModal({
                 <option value="pytest">Pytest</option>
                 <option value="gotest">Go (testing)</option>
                 <option value="restassured">JUnit5 + REST Assured</option>
+                <option value="vitest">Vitest</option>
+                <option value="playwright">Playwright (API)</option>
               </select>
             </label>
             <label>

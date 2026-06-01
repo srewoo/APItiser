@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { PROVIDER_MODELS } from '@shared/constants';
-import type { AppState, JobStage, RepoRef, TestCategory } from '@shared/types';
+import type { AppState, RepoRef, TestCategory } from '@shared/types';
 import type { EventMessage } from '@shared/messages';
 import { sendCommand } from './runtime';
 import { parseRepoFromUrl } from '@shared/repo';
@@ -61,7 +60,6 @@ export function App() {
     return mergedAppState.activeJob ?? mergedAppState.jobHistory[0] ?? null;
   }, [mergedAppState]);
 
-  const selectedProvider = mergedAppState?.settings.provider ?? 'openai';
   const skipExistingEnabled = mergedAppState?.settings.skipExistingTests ?? true;
   const latestMetric = mergedAppState?.metricsHistory?.[0];
   const endpoints = activeOrLatestJob?.endpoints ?? [];
@@ -177,7 +175,11 @@ export function App() {
   const handleCategoryToggle = async (category: TestCategory) => {
     if (!mergedAppState) return;
     const current = new Set(mergedAppState.settings.includeCategories);
-    current.has(category) ? current.delete(category) : current.add(category);
+    if (current.has(category)) {
+      current.delete(category);
+    } else {
+      current.add(category);
+    }
     const next = [...current];
     await patchSettings({ includeCategories: next.length ? next : ['positive'] });
   };
@@ -451,7 +453,7 @@ export function App() {
         activeOrLatestJob={activeOrLatestJob}
       />
 
-      <CoveragePanel activeOrLatestJob={activeOrLatestJob} />
+      <CoveragePanel activeOrLatestJob={activeOrLatestJob} selectedFramework={mergedAppState?.settings.framework} />
       <PerformancePanel latestMetric={latestMetric} />
 
       {generatedTests.length > 0 && activeOrLatestJob?.stage === 'complete' ? (

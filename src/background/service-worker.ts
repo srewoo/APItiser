@@ -25,6 +25,7 @@ import { detectExistingTestCoverage } from './parser/testCoverageDetector';
 import { scanRepositoryFiles } from './repo/scanner';
 import { validateRepoAccess } from './repo/validator';
 import { buildCoverage } from './generation/coverage';
+import { suggestFramework } from './generation/frameworkSuggest';
 import { buildArtifactZip } from './generation/zipBuilder';
 import { assessReadiness } from './generation/readiness';
 import { buildPostmanCollection } from './generation/postmanExport';
@@ -626,6 +627,7 @@ const runScanPipeline = async (
       existingTestEndpointIds,
       eligibleEndpointCount,
       coverage: preGenerationCoverage,
+      suggestedFramework: suggestFramework(endpoints),
       statusText: `Scan complete: ${endpoints.length} APIs (${existingTestEndpointIds.length} already tested${fallbackLabel})`,
       updatedAt: completedAt,
       timings: {

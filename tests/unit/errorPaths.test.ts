@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installFakeChrome } from '../helpers/chromeMock';
 import { assessGeneratedTestQuality, normalizeGeneratedTests } from '@background/generation/testGenerator';
 import { makeEndpoint, makeGeneratedTestCase } from '@shared/testing/factories';
-import type { ApiEndpoint, GeneratedTestCase } from '@shared/types';
+import type { GeneratedTestCase } from '@shared/types';
 
 afterEach(() => {
   vi.restoreAllMocks();

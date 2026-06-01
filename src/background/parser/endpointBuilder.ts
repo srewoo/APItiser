@@ -1,4 +1,4 @@
-import type { ApiEndpoint, EndpointEvidence, RepoFile } from '@shared/types';
+import type { ApiEndpoint, EndpointEvidence, RepoFile, SchemaField, SchemaObject } from '@shared/types';
 
 const toEndpointId = (method: string, path: string): string => `${method.toUpperCase()}::${path}`;
 
@@ -43,6 +43,87 @@ export const extractPathParams = (path: string) => {
     required: true,
     type: 'string'
   }));
+};
+
+const SAMPLE_BY_TYPE: Record<string, unknown> = {
+  string: 'example',
+  integer: 1,
+  number: 1,
+  boolean: true,
+  array: [],
+  object: {}
+};
+
+/** Produce a deterministic sample value for a primitive type/format pair. */
+export const sampleForType = (type?: string, format?: string): unknown => {
+  if (format === 'email') {
+    return 'user@example.com';
+  }
+  if (format === 'uuid') {
+    return '00000000-0000-0000-0000-000000000000';
+  }
+  if (format === 'date-time') {
+    return '2024-01-01T00:00:00Z';
+  }
+  if (format === 'date') {
+    return '2024-01-01';
+  }
+  return SAMPLE_BY_TYPE[type ?? 'string'] ?? 'example';
+};
+
+const isSchemaField = (value: SchemaObject | SchemaField): value is SchemaField => 'name' in value;
+
+/** Recursively build a concrete example object from a recovered SchemaObject. */
+export const exampleFromSchema = (schema?: SchemaObject): unknown => {
+  if (!schema) {
+    return undefined;
+  }
+  if (schema.example !== undefined) {
+    return schema.example;
+  }
+  if (schema.type === 'array') {
+    const item = exampleFromSchema(schema.items);
+    return item === undefined ? [] : [item];
+  }
+  if (schema.type !== 'object') {
+    return sampleForType(schema.type);
+  }
+  const required = new Set(schema.required ?? []);
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema.properties ?? {})) {
+    if (required.size > 0 && !required.has(key)) {
+      continue;
+    }
+    result[key] = isSchemaField(value) ? sampleForType(value.type, value.format) : exampleFromSchema(value);
+  }
+  return result;
+};
+
+/** Build an object SchemaObject from a flat list of recovered fields. */
+export const makeBodySchema = (
+  fields: Array<{ name: string; type?: string; required?: boolean; format?: string }>
+): SchemaObject | undefined => {
+  if (!fields.length) {
+    return undefined;
+  }
+  const properties: Record<string, SchemaField> = {};
+  const required: string[] = [];
+  for (const field of fields) {
+    properties[field.name] = {
+      name: field.name,
+      type: field.type ?? 'string',
+      required: field.required ?? false,
+      format: field.format
+    };
+    if (field.required) {
+      required.push(field.name);
+    }
+  }
+  return {
+    type: 'object',
+    properties,
+    required: required.length ? required : undefined
+  };
 };
 
 export const clampConfidence = (value: number): number => {

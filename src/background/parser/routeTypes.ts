@@ -14,6 +14,16 @@ export interface RouteSignal {
   file: RepoFile;
   confidence: number;
   evidence: EndpointEvidence[];
+  /** Query parameters recovered from the route declaration or handler signature. */
+  queryParams?: ApiEndpoint['queryParams'];
+  /** Path parameters recovered with richer typing than the path string alone implies. */
+  pathParams?: ApiEndpoint['pathParams'];
+  /** Request body schema recovered from the handler (DTO, Pydantic model, destructuring, etc.). */
+  body?: ApiEndpoint['body'];
+  /** Response signals recovered from the handler (status codes returned). */
+  responses?: ApiEndpoint['responses'];
+  /** Short human summary recovered from the route (operationId-like). */
+  summary?: string;
 }
 
 export interface MountSignal {
