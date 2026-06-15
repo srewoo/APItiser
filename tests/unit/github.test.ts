@@ -12,9 +12,8 @@ type FetchMockResponse = { ok: boolean; status: number; json: () => Promise<unkn
 
 let fetchCallLog: string[] = [];
 
-const makeFetch =
-  (handler: (url: string) => FetchMockResponse) =>
-    vi.fn((url: string) => Promise.resolve(handler(url)));
+const makeFetch = (handler: (url: string) => FetchMockResponse) =>
+  vi.fn((url: string) => Promise.resolve(handler(url)));
 
 const treeBlob = (path: string, sha: string) => ({
   path,
@@ -28,7 +27,7 @@ const treeDir = (path: string) => ({
   path,
   mode: '040000',
   type: 'tree' as const,
-  sha: 'dir-sha',
+  sha: 'dir-sha'
 });
 
 const contentsFile = (path: string, sha: string) => ({
@@ -40,8 +39,11 @@ const contentsFile = (path: string, sha: string) => ({
   download_url: null
 });
 
-const blobResponse = (content: string) =>
-  ({ ok: true, status: 200, json: async () => ({ encoding: 'base64', content: btoa(content), size: content.length }) });
+const blobResponse = (content: string) => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ encoding: 'base64', content: btoa(content), size: content.length })
+});
 
 // ---------------------------------------------------------------------------
 
@@ -59,7 +61,8 @@ describe('fetchGitHubRepoFiles — normal (non-truncated) tree', () => {
       fetchCallLog.push(url);
       if (url.includes('/git/trees/')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => ({
             tree: [treeBlob('src/routes/users.ts', 'sha1')],
             truncated: false
@@ -92,7 +95,8 @@ describe('fetchGitHubRepoFiles — truncated tree (large-repo fallback)', () => 
       // Recursive tree — truncated with one partial directory hint.
       if (url.includes('/git/trees/')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => ({
             tree: [treeDir('routes')],
             truncated: true
@@ -103,7 +107,8 @@ describe('fetchGitHubRepoFiles — truncated tree (large-repo fallback)', () => 
       // Contents API: root listing
       if (url.includes('/contents?ref=') || url.endsWith('/contents?ref=HEAD')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => [contentsFile('index.ts', 'sha-index')]
         };
       }
@@ -111,7 +116,8 @@ describe('fetchGitHubRepoFiles — truncated tree (large-repo fallback)', () => 
       // Contents API: routes/ listing
       if (url.includes('/contents/routes')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => [contentsFile('routes/users.ts', 'sha-users')]
         };
       }
@@ -143,7 +149,8 @@ describe('fetchGitHubRepoFiles — truncated tree (large-repo fallback)', () => 
 
       if (url.includes('/git/trees/')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => ({
             tree: [treeDir('node_modules'), treeDir('routes')],
             truncated: true
@@ -159,7 +166,8 @@ describe('fetchGitHubRepoFiles — truncated tree (large-repo fallback)', () => 
       // node_modules listing — should not be fetched.
       if (url.includes('/contents/node_modules')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => [contentsFile('node_modules/lodash/index.js', 'sha-lodash')]
         };
       }
@@ -167,7 +175,8 @@ describe('fetchGitHubRepoFiles — truncated tree (large-repo fallback)', () => 
       // routes/ listing.
       if (url.includes('/contents/routes')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => [contentsFile('routes/health.ts', 'sha-health')]
         };
       }
@@ -194,7 +203,8 @@ describe('fetchGitHubRepoFiles — truncated tree (large-repo fallback)', () => 
     const fetchMock = makeFetch((url) => {
       if (url.includes('/git/trees/')) {
         return {
-          ok: true, status: 200,
+          ok: true,
+          status: 200,
           json: async () => ({ tree: [treeDir('routes')], truncated: true })
         };
       }

@@ -16,7 +16,9 @@ const tests: GeneratedTestCase[] = [
     category: 'positive',
     title: 'lists users',
     trustLabel: 'high',
-    trustScore: 0.92,
+    // trustScore is a 1-99 integer in production (see qualityGate normalizeGeneratedTests),
+    // not a 0-1 fraction; 92 reflects a high-trust test on the real scale.
+    trustScore: 92,
     request: {
       method: 'GET',
       path: '/users'
@@ -72,17 +74,11 @@ describe('readiness assessment', () => {
 
 describe('renderGeneratedFiles', () => {
   it('packages a validation report alongside generated tests', () => {
-    const files = renderGeneratedFiles(
-      DEFAULT_SETTINGS,
-      repo,
-      1,
-      tests,
-      {
-        readiness: 'validated',
-        readinessNotes: ['1 test still relies on heuristic evidence.'],
-        validationSummary: passingSummary
-      }
-    );
+    const files = renderGeneratedFiles(DEFAULT_SETTINGS, repo, 1, tests, {
+      readiness: 'validated',
+      readinessNotes: ['1 test still relies on heuristic evidence.'],
+      validationSummary: passingSummary
+    });
 
     const report = files.find((file) => file.path === 'validation-report.json');
     const readme = files.find((file) => file.path === 'README.md');

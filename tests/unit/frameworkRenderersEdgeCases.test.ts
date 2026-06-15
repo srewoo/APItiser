@@ -35,7 +35,7 @@ describe('framework renderers — edge cases', () => {
     request: {
       method: 'POST',
       path: '/v1/search',
-      body: { query: '<script>alert("xss")</script>', filter: { "key": "val\"ue" } }
+      body: { query: '<script>alert("xss")</script>', filter: { key: 'val"ue' } }
     },
     expected: { status: 400, contains: ['invalid input'] }
   });
@@ -77,10 +77,13 @@ describe('framework renderers — edge cases', () => {
       expect(files[0]?.content.length).toBeGreaterThan(0);
     });
 
-    it('renders security tests with 401 expected status', () => {
+    it('asserts a client-error class (not an exact code) for security tests', () => {
+      // Security/negative tests assert the 4xx class rather than the model's exact
+      // guessed code, so a declared 401 renders as a 400-499 range assertion.
       const files = adapter.render(tests, baseMeta);
       const content = files.map((f) => f.content).join('\n');
-      expect(content).toContain('401');
+      expect(content).toContain('toBeGreaterThanOrEqual(400)');
+      expect(content).toContain('toBeLessThanOrEqual(499)');
     });
 
     it('renders README with endpoint count', () => {

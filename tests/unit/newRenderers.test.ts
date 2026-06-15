@@ -94,7 +94,7 @@ describe('PlaywrightFrameworkAdapter', () => {
     expect(files.length).toBeGreaterThanOrEqual(1);
 
     const content = files.map((file) => file.content).join('\n');
-    expect(content).toContain("@playwright/test");
+    expect(content).toContain('@playwright/test');
     expect(content).toContain('returns users');
     expect(content).toContain('/users');
     expect(content).toContain('expect(response.status()).toBe(200)');

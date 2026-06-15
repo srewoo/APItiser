@@ -1,5 +1,6 @@
 import { chunkArray } from '@background/utils/chunks';
 import { loadProviderAdapter } from '@background/llm/client';
+import { PROVIDER_MODELS } from '@shared/constants';
 import { getFrameworkAdapter } from './frameworks/registry';
 import {
   assessGeneratedTestQuality,
@@ -9,6 +10,7 @@ import {
 import type {
   ApiEndpoint,
   BatchGenerationDiagnostics,
+  BatchQualityAssessment,
   ExtensionSettings,
   GeneratedFile,
   GeneratedTestCase,
@@ -39,6 +41,8 @@ interface GenerateOptions {
     currentBatch: number;
     totalBatches: number;
     attempt: 'generate' | 'repair';
+    /** 'generate' for the main pass, 'backfill' for the coverage-completion pass. */
+    phase: 'generate' | 'backfill';
     elapsedMs: number;
     generatedTests: GeneratedTestCase[];
   }) => Promise<void>;
@@ -66,15 +70,29 @@ const getProviderKey = (settings: ExtensionSettings, provider: ExtensionSettings
   return settings.geminiKey ?? '';
 };
 
+/**
+ * Resolve the model id to send to a given provider. The configured `settings.model`
+ * only matches the configured `settings.provider`; during provider fallback we must
+ * NOT send (for example) an OpenAI model id to Claude. Use the configured model for
+ * the configured provider, and that provider's default model otherwise.
+ */
+const resolveModelForProvider = (settings: ExtensionSettings, provider: ExtensionSettings['provider']): string => {
+  if (provider === settings.provider && settings.model) {
+    return settings.model;
+  }
+  return PROVIDER_MODELS[provider]?.[0] ?? settings.model;
+};
+
 const generateBatchWithRepair = async (
   providerAdapter: Awaited<ReturnType<typeof loadProviderAdapter>>,
   batch: ApiEndpoint[],
   context: GenerateContext,
-  options: Pick<GenerateOptions, 'settings' | 'signal' | 'onBatchHeartbeat'> & { batchIndex: number; totalBatches: number; generatedTests: GeneratedTestCase[] }
+  options: Pick<GenerateOptions, 'settings' | 'signal' | 'onBatchHeartbeat'> & { provider: ExtensionSettings['provider']; batchIndex: number; totalBatches: number; generatedTests: GeneratedTestCase[]; phase?: 'generate' | 'backfill' }
 ): Promise<{ tests: GeneratedTestCase[]; diagnostics: BatchGenerationDiagnostics }> => {
   const baseProviderOptions = {
-    apiKey: getProviderKey(options.settings, options.settings.provider),
-    model: options.settings.model,
+    apiKey: getProviderKey(options.settings, options.provider),
+    model: resolveModelForProvider(options.settings, options.provider),
+    temperature: options.settings.temperature,
     signal: options.signal,
     timeoutMs: options.settings.timeoutMs,
     hardTimeoutMs: options.settings.timeoutMs * 2,
@@ -89,6 +107,7 @@ const generateBatchWithRepair = async (
           currentBatch: options.batchIndex,
           totalBatches: options.totalBatches,
           attempt,
+          phase: options.phase ?? 'generate',
           elapsedMs,
           generatedTests: options.generatedTests
         });
@@ -106,7 +125,7 @@ const generateBatchWithRepair = async (
       diagnostics: {
         batchIndex: options.batchIndex,
         endpointIds: batch.map((endpoint) => endpoint.id),
-        provider: options.settings.provider,
+        provider: options.provider,
         repairAttempted: false,
         assessment: quality
       }
@@ -139,7 +158,7 @@ const generateBatchWithRepair = async (
   const diagnostics: BatchGenerationDiagnostics = {
     batchIndex: options.batchIndex,
     endpointIds: batch.map((endpoint) => endpoint.id),
-    provider: options.settings.provider,
+    provider: options.provider,
     repairAttempted: repairCount > 0,
     assessment: quality
   };
@@ -156,7 +175,37 @@ export interface GenerationResult {
   files: GeneratedFile[];
   totalBatches: number;
   diagnostics: BatchGenerationDiagnostics[];
+  /** Assessment over ALL endpoints after generation + coverage backfill. */
+  finalAssessment: BatchQualityAssessment;
 }
+
+/**
+ * Endpoints that still have an error-severity quality issue (no tests at all, or a missing
+ * required category). These are the endpoints the coverage-completion pass must target.
+ */
+const endpointsWithErrors = (
+  endpoints: ApiEndpoint[],
+  tests: GeneratedTestCase[],
+  categories: string[]
+): ApiEndpoint[] => {
+  const assessment = assessGeneratedTestQuality(endpoints, tests, categories);
+  const failing = new Set(
+    assessment.issues.filter((issue) => issue.severity === 'error' && issue.endpointId).map((issue) => issue.endpointId as string)
+  );
+  return endpoints.filter((endpoint) => failing.has(endpoint.id));
+};
+
+const dedupeTests = (tests: GeneratedTestCase[]): GeneratedTestCase[] => {
+  const seen = new Set<string>();
+  return tests.filter((test) => {
+    const key = [test.endpointId, test.category, test.title, test.request.method, test.request.path, test.expected.status].join('|');
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+};
 
 export const renderGeneratedFiles = (
   settings: ExtensionSettings,
@@ -187,6 +236,26 @@ export const renderGeneratedFiles = (
     files.push(...frameworkAdapter.renderSupportFiles(projectMeta));
   }
 
+  // Surface any {{NAME}} runtime placeholders used in generated paths/queries/bodies as
+  // env vars so the suite is runnable without hunting through each test for what to set.
+  const AUTH_TOKENS = new Set(['API_TOKEN', 'API_KEY', 'CSRF_TOKEN', 'SESSION_COOKIE']);
+  const runtimeTokenNames = new Set<string>();
+  for (const test of tests) {
+    const haystack = [
+      test.request.path,
+      JSON.stringify(test.request.query ?? {}),
+      JSON.stringify(test.request.body ?? null),
+      // Header values carry auth placeholders too (e.g. an x-token header rendered as
+      // {{xtoken}}); without scanning them a required env var would be missing here.
+      JSON.stringify(test.request.headers ?? {})
+    ].join(' ');
+    for (const match of haystack.matchAll(/\{\{(\w+)\}\}/g)) {
+      if (!AUTH_TOKENS.has(match[1])) {
+        runtimeTokenNames.add(match[1]);
+      }
+    }
+  }
+
   files.push({
     path: '.env.example',
     content: [
@@ -194,7 +263,8 @@ export const renderGeneratedFiles = (
       'API_TOKEN=your_token_here',
       'API_KEY=your_api_key_here',
       'CSRF_TOKEN=your_csrf_token_here',
-      'SESSION_COOKIE=your_session_cookie_here'
+      'SESSION_COOKIE=your_session_cookie_here',
+      ...[...runtimeTokenNames].sort().map((name) => `${name}=replace-with-real-value`)
     ].join('\n') + '\n'
   });
 
@@ -279,7 +349,8 @@ export const repairTestsFromValidation = async (options: {
         const adapter = await loadProviderAdapter(provider);
         const generated = await adapter.generateTests(batch, context, {
           apiKey,
-          model: options.settings.model,
+          model: resolveModelForProvider(options.settings, provider),
+          temperature: options.settings.temperature,
           signal: options.signal,
           timeoutMs: options.settings.timeoutMs,
           hardTimeoutMs: options.settings.timeoutMs * 2,
@@ -342,6 +413,7 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
         const adapter = await loadProviderAdapter(provider);
         result = await generateBatchWithRepair(adapter, batch, context, {
           ...options,
+          provider,
           batchIndex: index,
           totalBatches: chunks.length,
           generatedTests: [...generatedTests]
@@ -382,13 +454,71 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
     }
   }
 
-  const files = renderGeneratedFiles(options.settings, options.repo, options.endpoints.length, generatedTests);
+  // Coverage-completion pass. The main loop can leave endpoints with zero tests or a
+  // missing category — usually because a large batch's JSON was truncated by the output
+  // token limit, or the model simply omitted some endpoints. Re-generate the still-failing
+  // endpoints in SMALL batches (so each gets ample token budget) until coverage is complete
+  // or we stop making progress.
+  const MAX_COVERAGE_ROUNDS = 3;
+  for (let round = 0; round < MAX_COVERAGE_ROUNDS; round += 1) {
+    const missing = endpointsWithErrors(options.endpoints, generatedTests, options.settings.includeCategories);
+    if (!missing.length) {
+      break;
+    }
+    const before = generatedTests.length;
+    const backfillChunks = chunkArray(missing, Math.max(1, Math.min(2, options.settings.batchSize)));
+
+    for (let chunkIndex = 0; chunkIndex < backfillChunks.length; chunkIndex += 1) {
+      const batch = backfillChunks[chunkIndex];
+      for (const provider of providersToTry) {
+        if (!getProviderKey(options.settings, provider)) {
+          continue;
+        }
+        try {
+          const adapter = await loadProviderAdapter(provider);
+          const result = await generateBatchWithRepair(adapter, batch, context, {
+            ...options,
+            provider,
+            phase: 'backfill',
+            // Kept in-range; the 'backfill' phase drives a distinct status message rather
+            // than an "N/total" batch counter (which would otherwise read e.g. "16/12").
+            batchIndex: Math.max(0, chunks.length - 1),
+            totalBatches: chunks.length,
+            generatedTests: [...generatedTests]
+          });
+          generatedTests.push(...result.tests);
+          break;
+        } catch (err) {
+          if (err instanceof BatchGenerationError) {
+            // Keep whatever the repair loop salvaged so partial coverage still improves.
+            generatedTests.push(...err.partialTests);
+            break;
+          }
+          console.warn('[APItiser] Coverage backfill batch failed.', err);
+        }
+      }
+    }
+
+    const deduped = dedupeTests(generatedTests);
+    generatedTests.length = 0;
+    generatedTests.push(...deduped);
+
+    if (generatedTests.length <= before) {
+      // No new tests this round — avoid looping forever on endpoints the model can't cover.
+      break;
+    }
+  }
+
+  const finalTests = dedupeTests(generatedTests);
+  const finalAssessment = assessGeneratedTestQuality(options.endpoints, finalTests, options.settings.includeCategories);
+  const files = renderGeneratedFiles(options.settings, options.repo, options.endpoints.length, finalTests);
 
   return {
-    tests: generatedTests,
+    tests: finalTests,
     files,
     totalBatches: chunks.length,
-    diagnostics
+    diagnostics,
+    finalAssessment
   };
 };
 

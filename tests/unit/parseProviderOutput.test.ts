@@ -36,9 +36,10 @@ describe('parseProviderOutput — format drift resilience', () => {
   });
 
   it('extracts JSON when wrapped in prose (leading and trailing commentary)', () => {
-    const value = 'Sure, here are the tests you requested:\n'
-      + JSON.stringify({ tests: [exampleTest] })
-      + '\n\nLet me know if you need more!';
+    const value =
+      'Sure, here are the tests you requested:\n' +
+      JSON.stringify({ tests: [exampleTest] }) +
+      '\n\nLet me know if you need more!';
     expect(parseProviderOutput(value)).toEqual([exampleTest]);
   });
 
@@ -48,9 +49,7 @@ describe('parseProviderOutput — format drift resilience', () => {
   });
 
   it('handles multiple fenced blocks and picks the first valid one', () => {
-    const value = '```json\nnot-json\n```\n\n```json\n'
-      + JSON.stringify({ tests: [exampleTest] })
-      + '\n```';
+    const value = '```json\nnot-json\n```\n\n```json\n' + JSON.stringify({ tests: [exampleTest] }) + '\n```';
     expect(parseProviderOutput(value)).toEqual([exampleTest]);
   });
 
@@ -66,7 +65,9 @@ describe('parseProviderOutput — format drift resilience', () => {
   });
 
   it('throws when no parseable JSON can be found', () => {
-    expect(() => parseProviderOutput('this is just prose with no json anywhere')).toThrow(/not a tests array or object/);
+    expect(() => parseProviderOutput('this is just prose with no json anywhere')).toThrow(
+      /not a tests array or object/
+    );
   });
 
   it('throws when parsed shape is neither array nor tests-container', () => {
@@ -80,8 +81,20 @@ describe('parseProviderOutput — format drift resilience', () => {
 });
 
 describe('parseProviderOutput — truncated response salvage', () => {
-  const t1 = { endpointId: 'POST::/a', category: 'positive', title: 'creates a', request: { method: 'POST', path: '/a' }, expected: { status: 201 } };
-  const t2 = { endpointId: 'POST::/b', category: 'negative', title: 'rejects b', request: { method: 'POST', path: '/b' }, expected: { status: 400 } };
+  const t1 = {
+    endpointId: 'POST::/a',
+    category: 'positive',
+    title: 'creates a',
+    request: { method: 'POST', path: '/a' },
+    expected: { status: 201 }
+  };
+  const t2 = {
+    endpointId: 'POST::/b',
+    category: 'negative',
+    title: 'rejects b',
+    request: { method: 'POST', path: '/b' },
+    expected: { status: 400 }
+  };
 
   it('recovers complete objects when the array is cut off mid-object', () => {
     // Two complete tests, then a third object truncated by the token limit.
@@ -101,7 +114,11 @@ describe('parseProviderOutput — truncated response salvage', () => {
       category: 'positive',
       title: 'x',
       request: { method: 'GET', path: '/x', query: { page: 1 } },
-      expected: { status: 200, jsonSchema: { type: 'object', properties: { id: { type: 'string' } } }, contains: ['ok'] }
+      expected: {
+        status: 200,
+        jsonSchema: { type: 'object', properties: { id: { type: 'string' } } },
+        contains: ['ok']
+      }
     };
     const truncated = `{"tests":[${JSON.stringify(withSchema)},{"endpointId":"GET::/y","req`;
     expect(parseProviderOutput(truncated)).toEqual([withSchema]);
@@ -123,7 +140,7 @@ describe('computeMaxOutputTokens', () => {
     expect(computeMaxOutputTokens(10)).toBe(12000);
   });
 
-  it('ceilings at 16000 (OpenAI gpt-4o completion cap)', () => {
+  it('ceilings at 16000 max output tokens (gpt-4o completion cap; safe for all providers)', () => {
     expect(computeMaxOutputTokens(20)).toBe(16000);
     expect(computeMaxOutputTokens(100)).toBe(16000);
   });

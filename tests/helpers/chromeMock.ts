@@ -29,10 +29,7 @@ export interface FakeChrome {
     _fire(name: string): void;
   };
   notifications: {
-    create(
-      options: Record<string, unknown>,
-      callback?: () => void
-    ): void;
+    create(options: Record<string, unknown>, callback?: () => void): void;
   };
   action: {
     setBadgeText(details: { text: string; tabId?: number }): void;
@@ -102,10 +99,7 @@ export const createFakeChrome = (): FakeChrome => {
       }
     },
     notifications: {
-      create: (
-        options: Record<string, unknown>,
-        callback?: () => void
-      ) => {
+      create: (options: Record<string, unknown>, callback?: () => void) => {
         notificationCalls.push({
           title: String(options.title ?? ''),
           message: String(options.message ?? '')

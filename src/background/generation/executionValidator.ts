@@ -1,4 +1,5 @@
 import { fetchWithTimeout } from '@background/llm/fetchWithTimeout';
+import { statusSatisfied, statusExpectationLabel } from './statusExpectation';
 import type {
   ApiEndpoint,
   ExtensionSettings,
@@ -16,6 +17,8 @@ interface RuntimeExecutionState {
   apiKey: string;
   csrfToken: string;
   sessionCookie: string;
+  /** Arbitrary named values (e.g. USER_ID) used to resolve {{NAME}} placeholders. */
+  values: Record<string, string>;
 }
 
 const snippet = (value: string): string => value.slice(0, 240);
@@ -24,21 +27,40 @@ const createRuntimeState = (settings: ExtensionSettings): RuntimeExecutionState 
   apiToken: settings.runtimeApiToken || '',
   apiKey: settings.runtimeApiKey || '',
   csrfToken: settings.runtimeCsrfToken || '',
-  sessionCookie: settings.runtimeSessionCookie || ''
+  sessionCookie: settings.runtimeSessionCookie || '',
+  values: { ...(settings.runtimeValues ?? {}) }
 });
 
-const resolveTemplateValue = (value: string, runtimeState: RuntimeExecutionState): string => {
-  if (value.includes('{{API_TOKEN}}')) {
-    return value.replace('{{API_TOKEN}}', runtimeState.apiToken || 'replace-me');
+const RUNTIME_TOKEN_RE = /\{\{(\w+)\}\}/g;
+
+/**
+ * Resolve every {{NAME}} placeholder in a string. The four auth tokens use their
+ * dedicated runtime slots; any other name resolves from the named-value registry
+ * (configured `runtimeValues` or values captured by setup steps). Unknown names fall
+ * back to 'replace-me' so a literal `{{...}}` never reaches the wire.
+ */
+const resolveTemplateValue = (value: string, runtimeState: RuntimeExecutionState): string =>
+  value.replace(RUNTIME_TOKEN_RE, (_match, name: string) => {
+    if (name === 'API_TOKEN') return runtimeState.apiToken || 'replace-me';
+    if (name === 'API_KEY') return runtimeState.apiKey || 'replace-me';
+    if (name === 'CSRF_TOKEN') return runtimeState.csrfToken || 'replace-me';
+    if (name === 'SESSION_COOKIE') return runtimeState.sessionCookie || 'replace-me';
+    return runtimeState.values[name] ?? 'replace-me';
+  });
+
+/** Deep-resolve {{NAME}} tokens in string leaves of a query/body value. */
+const resolveDeep = (value: unknown, runtimeState: RuntimeExecutionState): unknown => {
+  if (typeof value === 'string') {
+    return resolveTemplateValue(value, runtimeState);
   }
-  if (value.includes('{{API_KEY}}')) {
-    return value.replace('{{API_KEY}}', runtimeState.apiKey || 'replace-me');
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveDeep(item, runtimeState));
   }
-  if (value.includes('{{CSRF_TOKEN}}')) {
-    return value.replace('{{CSRF_TOKEN}}', runtimeState.csrfToken || 'replace-me');
-  }
-  if (value.includes('{{SESSION_COOKIE}}')) {
-    return value.replace('{{SESSION_COOKIE}}', runtimeState.sessionCookie || 'replace-me');
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>).reduce<Record<string, unknown>>((acc, [key, child]) => {
+      acc[key] = resolveDeep(child, runtimeState);
+      return acc;
+    }, {});
   }
   return value;
 };
@@ -218,13 +240,23 @@ const validateContracts = (test: GeneratedTestCase, endpoint: ApiEndpoint, paylo
   const failures: ValidationFailure[] = [];
 
   if (test.expected.pagination) {
+    // A list endpoint is "paginated-shaped" if it's an array, has a conventional
+    // items/results/data envelope, OR has any array-valued key (domain wrappers like
+    // {"events": [...]} or {"alerts": [...]} are common and were previously missed).
     const paginated = Array.isArray(payload)
-      || (payload && typeof payload === 'object' && ['items', 'results', 'data'].some((key) => key in (payload as Record<string, unknown>)));
+      || (
+        Boolean(payload)
+        && typeof payload === 'object'
+        && (
+          ['items', 'results', 'data'].some((key) => key in (payload as Record<string, unknown>))
+          || Object.values(payload as Record<string, unknown>).some((entry) => Array.isArray(entry))
+        )
+      );
     if (!paginated) {
       failures.push({
         type: 'pagination',
         message: 'Expected paginated/list response structure.',
-        expected: 'array or object with items/results/data'
+        expected: 'array or object with a list-valued field (e.g. items/results/data or a domain key)'
       });
     }
   }
@@ -275,15 +307,21 @@ const executeSetupSteps = async (
     let responseSnippet = '';
 
     try {
+      const stepPath = resolveTemplateValue(step.path, runtimeState);
+      const stepQuery = resolveDeep(step.query ?? {}, runtimeState) as Record<string, unknown>;
+      const stepBody = step.body === undefined || step.body === null
+        ? undefined
+        : resolveDeep(step.body, runtimeState);
+
       const response = await fetchWithTimeout(
-        buildUrl(settings.baseUrl, step.path, step.query),
+        buildUrl(settings.baseUrl, stepPath, stepQuery),
         {
           method: step.method,
           headers: {
             'Content-Type': 'application/json',
             ...buildHeaders(step.headers, settings, runtimeState)
           },
-          body: step.body === undefined || step.body === null ? undefined : JSON.stringify(step.body)
+          body: stepBody === undefined ? undefined : JSON.stringify(stepBody)
         },
         {
           timeoutMs: Math.max(10_000, Math.min(settings.timeoutMs, 60_000)),
@@ -340,6 +378,22 @@ const executeSetupSteps = async (
           extracted.push(key);
         } else {
           warnings.push(`Setup step "${step.name}" did not find response header "${headerName}" for ${key}.`);
+        }
+      }
+
+      // Generic named-value capture for resource chaining: store any extracted value
+      // under its placeholder name so later steps and the test suite can reference it
+      // as {{NAME}}.
+      for (const [name, path] of Object.entries(step.extractValues ?? {})) {
+        if (!path) {
+          continue;
+        }
+        const value = getByPath(json, path);
+        if (value !== undefined && value !== null) {
+          runtimeState.values[name] = String(value);
+          extracted.push(name);
+        } else {
+          warnings.push(`Setup step "${step.name}" did not find JSON path "${path}" for {{${name}}}.`);
         }
       }
 
@@ -441,15 +495,25 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
     let responseSnippet = '';
 
     try {
+      // Resolve {{NAME}} placeholders (e.g. {{USER_ID}}) in the path, query, and body
+      // from the runtime-value registry before issuing the request — this is what makes
+      // id-bearing endpoints validate against real, seeded data instead of 404ing on a
+      // fabricated id.
+      const resolvedPath = resolveTemplateValue(test.request.path, runtimeState);
+      const resolvedQuery = resolveDeep(test.request.query ?? {}, runtimeState) as Record<string, unknown>;
+      const resolvedBody = test.request.body === undefined || test.request.body === null
+        ? undefined
+        : resolveDeep(test.request.body, runtimeState);
+
       const response = await fetchWithTimeout(
-        buildUrl(settings.baseUrl, test.request.path, test.request.query),
+        buildUrl(settings.baseUrl, resolvedPath, resolvedQuery),
         {
           method: test.request.method,
           headers: {
             'Content-Type': 'application/json',
             ...buildHeaders(test.request.headers, settings, runtimeState)
           },
-          body: test.request.body === undefined || test.request.body === null ? undefined : JSON.stringify(test.request.body)
+          body: resolvedBody === undefined ? undefined : JSON.stringify(resolvedBody)
         },
         {
           timeoutMs: Math.max(10_000, Math.min(settings.timeoutMs, 60_000)),
@@ -462,11 +526,14 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
       const text = await response.text();
       responseSnippet = snippet(text);
 
-      if (response.status !== test.expected.status) {
+      // Non-positive categories (negative/security/edge) only need to land in the right
+      // status *class*; asserting an exact code on those produced false failures whenever
+      // the model guessed e.g. 400 for an API that answers 422.
+      if (!statusSatisfied(test, response.status)) {
         failures.push({
           type: test.category === 'security' ? 'auth' : 'status',
-          message: `Expected HTTP ${test.expected.status} but received ${response.status}.`,
-          expected: String(test.expected.status),
+          message: `Expected HTTP ${statusExpectationLabel(test)} but received ${response.status}.`,
+          expected: statusExpectationLabel(test),
           actual: String(response.status)
         });
       }

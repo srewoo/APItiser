@@ -8,7 +8,13 @@ const repo: RepoRef = { platform: 'gitlab', owner: 'acme', repo: 'my-api' };
 // Mock helpers
 // ---------------------------------------------------------------------------
 
-type MockHandler = (url: string) => { ok: boolean; status: number; text?: () => Promise<string>; json?: () => Promise<unknown>; headers?: Headers };
+type MockHandler = (url: string) => {
+  ok: boolean;
+  status: number;
+  text?: () => Promise<string>;
+  json?: () => Promise<unknown>;
+  headers?: Headers;
+};
 
 const makeFetch = (handler: MockHandler) =>
   vi.fn((url: string, _init?: RequestInit) => {
@@ -19,17 +25,16 @@ const makeFetch = (handler: MockHandler) =>
       status: result.status,
       headers,
       json: result.json ?? (async () => ({})),
-      text: result.text ?? (async () => ''),
+      text: result.text ?? (async () => '')
     });
   });
 
-const treeResponse = (items: unknown[], nextPage = '') =>
-  ({
-    ok: true,
-    status: 200,
-    headers: new Headers({ 'x-next-page': nextPage }),
-    json: async () => items
-  });
+const treeResponse = (items: unknown[], nextPage = '') => ({
+  ok: true,
+  status: 200,
+  headers: new Headers({ 'x-next-page': nextPage }),
+  json: async () => items
+});
 
 const fileResponse = (content: string) => ({
   ok: true,
@@ -179,8 +184,12 @@ describe('fetchGitLabRepoFiles', () => {
 
     await fetchGitLabRepoFiles(branchRepo);
 
-    expect(requestedUrls.some((url) => url.includes('/repository/tree') && url.includes('ref=feature%2Flogin-hardening'))).toBe(true);
-    expect(requestedUrls.some((url) => url.includes('/repository/files/') && url.includes('ref=feature%2Flogin-hardening'))).toBe(true);
+    expect(
+      requestedUrls.some((url) => url.includes('/repository/tree') && url.includes('ref=feature%2Flogin-hardening'))
+    ).toBe(true);
+    expect(
+      requestedUrls.some((url) => url.includes('/repository/files/') && url.includes('ref=feature%2Flogin-hardening'))
+    ).toBe(true);
   });
 
   it('returns an empty list when the tree API fails', async () => {

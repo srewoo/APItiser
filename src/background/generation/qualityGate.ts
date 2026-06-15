@@ -90,7 +90,14 @@ export const endpointPathToRegex = (path: string): RegExp => {
   return new RegExp(`^${final}$`, 'i');
 };
 
-export const hasPlaceholders = (path: string): boolean => /:\w|\{[^}]+\}/.test(path);
+/**
+ * True when a path still contains an *unresolved route template* (`:id` or `{id}`).
+ * `{{NAME}}` double-brace tokens are intentionally NOT placeholders here — they are
+ * resolvable runtime values (injected from env / setup-captured values during live
+ * validation and surfaced as env vars in generated files), so they pass the gate.
+ */
+export const hasPlaceholders = (path: string): boolean =>
+  /:\w|\{[^}]+\}/.test(path.replace(/\{\{[^}]+\}\}/g, ''));
 
 const normalizeRequestPath = (value: unknown, endpoint: ApiEndpoint): string => {
   const candidate = typeof value === 'string' ? value.trim().split('?')[0] : '';

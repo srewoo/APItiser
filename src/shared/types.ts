@@ -18,7 +18,7 @@ export type PromptMode = 'generate' | 'repair';
 
 export type QualitySeverity = 'warn' | 'error';
 
-export type JobQualityStatus = 'pending' | 'passed' | 'failed';
+export type JobQualityStatus = 'pending' | 'passed' | 'partial' | 'failed';
 
 export type ReadinessState = 'scaffold' | 'review_required' | 'validated' | 'production_candidate';
 
@@ -229,6 +229,11 @@ export interface GeneratedArtifact {
 export interface ExtensionSettings {
   provider: LLMProvider;
   model: string;
+  /**
+   * Sampling temperature for classic (non-reasoning) models. Ignored for reasoning models
+   * (OpenAI o-series/gpt-5, Claude 4.x, …) which reject the parameter — see modelCapabilities.
+   */
+  temperature?: number;
   framework: TestFramework;
   includeCategories: TestCategory[];
   testDirectories: string[];
@@ -272,6 +277,13 @@ export interface ExtensionSettings {
   runtimeAuthMode?: RuntimeAuthMode;
   /** Optional explicit setup/login flow executed before live validation */
   runtimeSetupSteps?: RuntimeSetupStep[];
+  /**
+   * Named runtime values (e.g. { USER_ID: "42" }) used to resolve `{{NAME}}` placeholders
+   * in generated test paths/queries/bodies during live validation. Setup steps can also
+   * populate these via `extractValues`. Generated test files surface the same names as
+   * environment variables so a real id can be injected without editing each test.
+   */
+  runtimeValues?: Record<string, string>;
 }
 
 export interface JobTimings {
@@ -333,6 +345,12 @@ export interface RuntimeSetupStep {
   extractJsonPaths?: Partial<Record<'apiToken' | 'apiKey' | 'csrfToken' | 'sessionCookie', string>>;
   extractHeaders?: Partial<Record<'apiToken' | 'apiKey' | 'csrfToken' | 'sessionCookie', string>>;
   extractCookieName?: string;
+  /**
+   * Capture arbitrary named runtime values from this step's JSON response, keyed by the
+   * placeholder name used in test paths/bodies (e.g. { USER_ID: "data.id" }). Enables
+   * resource chaining: create a resource here, then reference its id as {{USER_ID}}.
+   */
+  extractValues?: Record<string, string>;
 }
 
 export interface ValidationSetupStepResult {
@@ -458,6 +476,8 @@ export interface LLMProviderAdapter {
 export interface ProviderOptions {
   apiKey: string;
   model: string;
+  /** Sampling temperature; omitted automatically for reasoning models by each adapter. */
+  temperature?: number;
   signal?: AbortSignal;
   timeoutMs: number;
   hardTimeoutMs?: number;

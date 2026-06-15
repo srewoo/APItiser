@@ -157,6 +157,11 @@ export function SettingsModal({
 
   const selectedProvider = appState?.settings.provider ?? 'openai';
   const availableModels = PROVIDER_MODELS[selectedProvider];
+  const selectedModel = appState?.settings.model ?? availableModels[0];
+  // Mirrors background/llm/modelCapabilities — reasoning models reject a temperature value.
+  const isReasoningModel =
+    (selectedProvider === 'openai' && (/^o\d/i.test(selectedModel) || /^gpt-5/i.test(selectedModel)))
+    || (selectedProvider === 'claude' && /claude-(opus-4|sonnet-4-6|haiku-4|fable-5|mythos)/i.test(selectedModel));
   const selectedProviderKey =
     selectedProvider === 'openai'
       ? appState?.settings.openAiKey ?? ''
@@ -265,6 +270,24 @@ export function SettingsModal({
               }}
             />
             {keyWarning ? <small className="key-warning">{keyWarning}</small> : null}
+          </label>
+          <label>
+            Temperature{isReasoningModel ? ' (ignored for reasoning models)' : ''}
+            <input
+              type="number"
+              min={0}
+              max={2}
+              step={0.1}
+              disabled={isReasoningModel}
+              value={isReasoningModel ? '' : appState?.settings.temperature ?? 0.2}
+              placeholder={isReasoningModel ? 'n/a — model controls this' : '0.2'}
+              onChange={(event) => onPatchSettings({ temperature: Number(event.target.value) })}
+            />
+            <small className="subtle">
+              {isReasoningModel
+                ? 'This model reasons internally and rejects a temperature value, so APItiser omits it automatically.'
+                : 'Lower = more deterministic tests (0.2 recommended). Reasoning models ignore this.'}
+            </small>
           </label>
           <label className="inline-toggle">
             <input

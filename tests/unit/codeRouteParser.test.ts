@@ -61,8 +61,16 @@ describe('parseCodeRoutes', () => {
 
     expect(endpoints.some((endpoint) => endpoint.source === 'koa' && endpoint.path === '/orders')).toBe(true);
     expect(endpoints.some((endpoint) => endpoint.source === 'hono' && endpoint.path === '/health')).toBe(true);
-    expect(endpoints.some((endpoint) => endpoint.source === 'nextjs' && endpoint.method === 'GET' && endpoint.path === '/api/users/:id')).toBe(true);
-    expect(endpoints.some((endpoint) => endpoint.source === 'nextjs' && endpoint.method === 'DELETE' && endpoint.path === '/api/users/:id')).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'nextjs' && endpoint.method === 'GET' && endpoint.path === '/api/users/:id'
+      )
+    ).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'nextjs' && endpoint.method === 'DELETE' && endpoint.path === '/api/users/:id'
+      )
+    ).toBe(true);
   });
 
   it('detects python fastapi and flask routes', () => {
@@ -90,8 +98,16 @@ describe('parseCodeRoutes', () => {
     ]);
 
     expect(endpoints.some((endpoint) => endpoint.source === 'fastapi' && endpoint.path === '/users/:id')).toBe(true);
-    expect(endpoints.some((endpoint) => endpoint.source === 'flask' && endpoint.method === 'GET' && endpoint.path === '/orders')).toBe(true);
-    expect(endpoints.some((endpoint) => endpoint.source === 'flask' && endpoint.method === 'POST' && endpoint.path === '/orders')).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'flask' && endpoint.method === 'GET' && endpoint.path === '/orders'
+      )
+    ).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'flask' && endpoint.method === 'POST' && endpoint.path === '/orders'
+      )
+    ).toBe(true);
   });
 
   it('detects chained express route declarations', () => {
@@ -108,8 +124,16 @@ describe('parseCodeRoutes', () => {
       }
     ]);
 
-    expect(endpoints.some((endpoint) => endpoint.source === 'express' && endpoint.method === 'GET' && endpoint.path === '/users/:id')).toBe(true);
-    expect(endpoints.some((endpoint) => endpoint.source === 'express' && endpoint.method === 'PATCH' && endpoint.path === '/users/:id')).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'express' && endpoint.method === 'GET' && endpoint.path === '/users/:id'
+      )
+    ).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'express' && endpoint.method === 'PATCH' && endpoint.path === '/users/:id'
+      )
+    ).toBe(true);
   });
 
   it('detects spring and gin routes with prefixes', () => {
@@ -135,7 +159,15 @@ describe('parseCodeRoutes', () => {
       }
     ]);
 
-    expect(endpoints.some((endpoint) => endpoint.source === 'spring' && endpoint.method === 'GET' && endpoint.path === '/api/users/:id')).toBe(true);
-    expect(endpoints.some((endpoint) => endpoint.source === 'gin' && endpoint.method === 'POST' && endpoint.path === '/v1/orders')).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'spring' && endpoint.method === 'GET' && endpoint.path === '/api/users/:id'
+      )
+    ).toBe(true);
+    expect(
+      endpoints.some(
+        (endpoint) => endpoint.source === 'gin' && endpoint.method === 'POST' && endpoint.path === '/v1/orders'
+      )
+    ).toBe(true);
   });
 });

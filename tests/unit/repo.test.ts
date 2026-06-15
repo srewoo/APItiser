@@ -92,10 +92,7 @@ describe('parseRepoFromUrl — GitLab (gitlab.com)', () => {
 
 describe('parseRepoFromUrl — Self-hosted GitLab', () => {
   it('parses a self-hosted GitLab URL when base URL matches', () => {
-    const result = parseRepoFromUrl(
-      'https://git.company.com/team/project',
-      'https://git.company.com'
-    );
+    const result = parseRepoFromUrl('https://git.company.com/team/project', 'https://git.company.com');
     expect(result).toMatchObject({
       platform: 'gitlab',
       owner: 'team',
@@ -105,10 +102,7 @@ describe('parseRepoFromUrl — Self-hosted GitLab', () => {
   });
 
   it('returns null for a self-hosted URL when base URL does not match', () => {
-    const result = parseRepoFromUrl(
-      'https://git.other.com/team/project',
-      'https://git.company.com'
-    );
+    const result = parseRepoFromUrl('https://git.other.com/team/project', 'https://git.company.com');
     expect(result).toBeNull();
   });
 });

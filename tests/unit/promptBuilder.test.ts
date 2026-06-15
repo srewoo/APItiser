@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildPrompt, buildProviderPrompt, buildProviderSystemPrompt, buildRepairPrompt, parseProviderOutput } from '@background/llm/promptBuilder';
+import {
+  buildPrompt,
+  buildProviderPrompt,
+  buildProviderSystemPrompt,
+  buildRepairPrompt,
+  parseProviderOutput
+} from '@background/llm/promptBuilder';
 import type { ApiEndpoint, GenerateContext } from '@shared/types';
 
 describe('buildPrompt', () => {
@@ -55,7 +61,15 @@ describe('buildPrompt', () => {
       endpoints,
       context,
       [{ endpointId: 'GET::/users/:id', category: 'positive', title: 'gets user' }],
-      [{ code: 'missing-category', severity: 'error', message: 'Missing negative test for GET /users/:id', endpointId: 'GET::/users/:id', category: 'negative' }]
+      [
+        {
+          code: 'missing-category',
+          severity: 'error',
+          message: 'Missing negative test for GET /users/:id',
+          endpointId: 'GET::/users/:id',
+          category: 'negative'
+        }
+      ]
     );
 
     expect(prompt).toContain('test-repair engine');
@@ -91,7 +105,11 @@ describe('buildPrompt', () => {
       timeoutMs: 120000
     };
 
-    const claudePrompt = buildProviderPrompt('claude', endpoints, context, { mode: 'repair', currentTests: [], issues: [] });
+    const claudePrompt = buildProviderPrompt('claude', endpoints, context, {
+      mode: 'repair',
+      currentTests: [],
+      issues: []
+    });
     expect(claudePrompt).toContain('Claude repair mode');
     expect(claudePrompt).toContain('concretePath');
     expect(claudePrompt).toContain('requiredFields');

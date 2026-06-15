@@ -1,5 +1,7 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
+import { renderStatusAssertionJs } from '../statusExpectation';
+import { jsPathExpr } from './runtimeTokens';
 
 const headerValueExpr = (value: string): string =>
   value === 'Bearer {{API_TOKEN}}'
@@ -60,19 +62,36 @@ export class SupertestFrameworkAdapter implements TestFrameworkAdapter {
           const headerAsserts = Object.entries(testCase.expected.responseHeaders ?? {})
             .map(([k, v]) => `    expect(response.headers[${JSON.stringify(k.toLowerCase())}]).toBe(${JSON.stringify(v)});`)
             .join('\n');
+          // Schema, pagination, and contract expectations were previously dropped by this
+          // renderer (unlike jest/vitest/mocha/pytest), so supertest suites silently
+          // under-asserted. response.body is already JSON-parsed by supertest.
+          const schemaAsserts = testCase.expected.jsonSchema
+            ? `    assertSchemaShape(${JSON.stringify(testCase.expected.jsonSchema, null, 2).replace(/\n/g, '\n    ')}, response.body, 'response');`
+            : '';
+          const paginationAssert = testCase.expected.pagination
+            ? '    expect(isPaginatedShape(response.body)).toBe(true);'
+            : '';
+          const contractComments = testCase.expected.contractChecks?.length
+            ? testCase.expected.contractChecks
+                .map((v) => `    // Contract expectation (verify manually): ${String(v).replace(/\s+/g, ' ').trim()}`)
+                .join('\n')
+            : '';
 
           return `  test(${JSON.stringify(testCase.title)}, async () => {
     // ${testCase.category} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
     const response = await request(BASE_URL)
-      .${method}(${JSON.stringify(testCase.request.path)})
+      .${method}(${jsPathExpr(testCase.request.path)})
       .set('Content-Type', 'application/json')
 ${headers}
 ${query}
 ${body};
-    expect(response.status).toBe(${testCase.expected.status});
+${renderStatusAssertionJs(testCase, 'response.status', '    ')}
 ${ctAssert}
 ${headerAsserts}
 ${containsAsserts}
+${schemaAsserts}
+${paginationAssert}
+${contractComments}
   });`;
         })
         .join('\n\n');
@@ -85,6 +104,49 @@ ${containsAsserts}
  */
 const request = require('supertest');
 const BASE_URL = process.env.API_BASE_URL || 'http://localhost:3000';
+
+const isPaginatedShape = (value) => Array.isArray(value)
+  || (value && typeof value === 'object'
+    && (['items', 'results', 'data'].some((key) => key in value) || Object.values(value).some((entry) => Array.isArray(entry))));
+
+const assertSchemaShape = (schema, value, path = 'response') => {
+  if (!schema) {
+    return;
+  }
+  if (schema.type === 'array') {
+    expect(Array.isArray(value)).toBe(true);
+    if (schema.items && Array.isArray(value) && value.length > 0) {
+      assertSchemaShape(schema.items, value[0], \`\${path}[0]\`);
+    }
+    return;
+  }
+  if (schema.type === 'object') {
+    expect(value).not.toBeNull();
+    expect(typeof value).toBe('object');
+    for (const key of schema.required || []) {
+      expect(value).toHaveProperty(key);
+    }
+    for (const [key, child] of Object.entries(schema.properties || {})) {
+      if (value && Object.prototype.hasOwnProperty.call(value, key)) {
+        assertSchemaShape(child, value[key], \`\${path}.\${key}\`);
+      }
+    }
+    return;
+  }
+  if (schema.type === 'integer') {
+    expect(Number.isInteger(value)).toBe(true);
+    return;
+  }
+  if (schema.type === 'number') {
+    expect(typeof value).toBe('number');
+    return;
+  }
+  if (schema.type === 'boolean') {
+    expect(typeof value).toBe('boolean');
+    return;
+  }
+  expect(typeof value).toBe(schema.type || 'string');
+};
 
 describe(${JSON.stringify(groupKey)}, () => {
 ${blocks}

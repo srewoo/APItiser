@@ -18,8 +18,7 @@ const signalAwareHangingFetch = vi.fn((_input: RequestInfo | URL, init?: Request
   });
 });
 
-const instantFetch = (): Promise<Response> =>
-  Promise.resolve(new Response('ok', { status: 200 }));
+const instantFetch = (): Promise<Response> => Promise.resolve(new Response('ok', { status: 200 }));
 
 beforeEach(() => {
   vi.useFakeTimers();

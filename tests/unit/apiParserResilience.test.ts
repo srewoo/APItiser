@@ -44,9 +44,6 @@ describe('parseApiMap resilience', () => {
     ]);
 
     expect(endpoints).toEqual([codeEndpoint]);
-    expect(warnSpy).toHaveBeenCalledWith(
-      '[APItiser] OpenAPI parsing failed during scan.',
-      expect.any(Error)
-    );
+    expect(warnSpy).toHaveBeenCalledWith('[APItiser] OpenAPI parsing failed during scan.', expect.any(Error));
   });
 });

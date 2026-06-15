@@ -1,5 +1,7 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
+import { renderStatusAssertionJs } from '../statusExpectation';
+import { jsTemplatePath } from './runtimeTokens';
 
 const headerValueExpr = (value: string): string =>
   value === 'Bearer {{API_TOKEN}}'
@@ -80,8 +82,8 @@ export class PlaywrightFrameworkAdapter implements TestFrameworkAdapter {
 
           return `test(${JSON.stringify(testCase.title)}, async ({ request }) => {
   // ${testCase.category} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
-  const response = await request.${requestMethod}(\`${'${BASE_URL}'}${testCase.request.path}\`${optionsArg});
-  expect(response.status()).toBe(${testCase.expected.status});
+  const response = await request.${requestMethod}(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}\`${optionsArg});
+${renderStatusAssertionJs(testCase, 'response.status()', '  ')}
   const text = await response.text();
 ${ctAssert}
 ${headerAsserts}

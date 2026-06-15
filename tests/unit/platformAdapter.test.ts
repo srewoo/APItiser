@@ -60,7 +60,9 @@ describe('createFakePlatform — contract', () => {
 
   it('alarms.onAlarm fires when _fireAlarm is invoked', () => {
     let fired: string | null = null;
-    platform.alarms.onAlarm((alarm) => { fired = alarm.name; });
+    platform.alarms.onAlarm((alarm) => {
+      fired = alarm.name;
+    });
     platform._fireAlarm('heartbeat');
     expect(fired).toBe('heartbeat');
   });
@@ -80,7 +82,9 @@ describe('createFakePlatform — contract', () => {
 
   it('lifecycle fires registered handlers', async () => {
     let installed = 0;
-    platform.lifecycle.onInstalled(() => { installed += 1; });
+    platform.lifecycle.onInstalled(() => {
+      installed += 1;
+    });
     await platform._fireInstalled();
     expect(installed).toBe(1);
   });

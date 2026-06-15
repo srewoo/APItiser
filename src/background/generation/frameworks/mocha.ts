@@ -1,5 +1,7 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
+import { renderStatusAssertionChai } from '../statusExpectation';
+import { jsTemplatePath } from './runtimeTokens';
 
 const toJsHeaderValue = (value: string): string =>
   value === 'Bearer {{API_TOKEN}}'
@@ -62,11 +64,18 @@ export class MochaFrameworkAdapter implements TestFrameworkAdapter {
           const schemaChecks = testCase.expected.jsonSchema
             ? `    const parsed = safeJsonParse(text);\n    assertSchemaShape(${jsonSchema}, parsed, 'response');`
             : '    // No schema assertions provided';
+          // Contract checks are free-text expectations that cannot be auto-asserted;
+          // render them as documented expectations for manual verification.
+          const contractChecksBlock = testCase.expected.contractChecks?.length
+            ? testCase.expected.contractChecks
+                .map((value) => `    // Contract expectation (verify manually): ${String(value).replace(/\s+/g, ' ').trim()}`)
+                .join('\n')
+            : '    // No contract checks provided';
           const paginationCheck = testCase.expected.pagination
             ? `    const parsedForPagination = safeJsonParse(text);\n    expect(isPaginatedShape(parsedForPagination)).to.equal(true);`
             : '    // Pagination not asserted';
           const idempotencyCheck = testCase.expected.idempotent
-            ? `    const repeat = await fetch(\`${'${BASE_URL}'}${testCase.request.path}${'${query ? `?${query}` : ""}'}\`, {\n      method: ${JSON.stringify(testCase.request.method)},\n      headers: {\n        'Content-Type': 'application/json',\n        ...${requestHeaders}\n      },\n      body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined\n    });\n    expect(repeat.status).to.be.lessThan(500);`
+            ? `    const repeat = await fetch(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {\n      method: ${JSON.stringify(testCase.request.method)},\n      headers: {\n        'Content-Type': 'application/json',\n        ...${requestHeaders}\n      },\n      body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined\n    });\n    expect(repeat.status).to.be.lessThan(500);`
             : '    // Idempotency not asserted';
 
           return `  it(${JSON.stringify(testCase.title)}, async () => {
@@ -81,7 +90,7 @@ export class MochaFrameworkAdapter implements TestFrameworkAdapter {
       }, {})
     ).toString();
 
-    const response = await fetch(\`${'${BASE_URL}'}${testCase.request.path}${'${query ? `?${query}` : ""}'}\`, {
+    const response = await fetch(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {
       method: ${JSON.stringify(testCase.request.method)},
       headers: {
         'Content-Type': 'application/json',
@@ -90,12 +99,13 @@ export class MochaFrameworkAdapter implements TestFrameworkAdapter {
       body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined
     });
 
-    expect(response.status).to.equal(${testCase.expected.status});
+${renderStatusAssertionChai(testCase, 'response.status', '    ')}
     const text = await response.text();
 ${contains}
 ${contentType}
 ${headerChecks}
 ${schemaChecks}
+${contractChecksBlock}
 ${paginationCheck}
 ${idempotencyCheck}
   });`;
@@ -123,7 +133,8 @@ const safeJsonParse = (text) => {
 };
 
 const isPaginatedShape = (value) => Array.isArray(value)
-  || (value && typeof value === 'object' && ['items', 'results', 'data'].some((key) => key in value));
+  || (value && typeof value === 'object'
+    && (['items', 'results', 'data'].some((key) => key in value) || Object.values(value).some((entry) => Array.isArray(entry))));
 
 const assertSchemaShape = (schema, value, path = 'response') => {
   if (!schema) return;

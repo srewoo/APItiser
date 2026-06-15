@@ -84,9 +84,9 @@ describe('OpenAiAdapter', () => {
       vi.fn(() => Promise.resolve({ ok: false, status: 429, json: async () => ({}), text: async () => '' }))
     );
 
-    await expect(
-      new OpenAiAdapter().generateTests([endpoint], context, baseOptions)
-    ).rejects.toThrow('OpenAI call failed: 429');
+    await expect(new OpenAiAdapter().generateTests([endpoint], context, baseOptions)).rejects.toThrow(
+      'OpenAI call failed: 429'
+    );
   });
 });
 
@@ -117,9 +117,7 @@ describe('ClaudeAdapter', () => {
       vi.fn(() => Promise.resolve({ ok: false, status: 401, json: async () => ({}), text: async () => '' }))
     );
 
-    await expect(
-      new ClaudeAdapter().generateTests([endpoint], context, baseOptions)
-    ).rejects.toThrow();
+    await expect(new ClaudeAdapter().generateTests([endpoint], context, baseOptions)).rejects.toThrow();
   });
 
   it('sets max_tokens dynamically based on batch size', async () => {
@@ -195,8 +193,6 @@ describe('GeminiAdapter', () => {
       vi.fn(() => Promise.resolve({ ok: false, status: 403, json: async () => ({}), text: async () => '' }))
     );
 
-    await expect(
-      new GeminiAdapter().generateTests([endpoint], context, baseOptions)
-    ).rejects.toThrow();
+    await expect(new GeminiAdapter().generateTests([endpoint], context, baseOptions)).rejects.toThrow();
   });
 });

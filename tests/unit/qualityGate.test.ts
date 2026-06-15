@@ -234,62 +234,72 @@ describe('normalizeGeneratedTests', () => {
   });
 
   it('injects default auth header for bearer endpoints when absent', () => {
-    const input = [{
-      endpointId: 'GET::/users',
-      category: 'positive',
-      title: 'GET /users returns list',
-      request: { method: 'GET', path: '/users', headers: {} },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        endpointId: 'GET::/users',
+        category: 'positive',
+        title: 'GET /users returns list',
+        request: { method: 'GET', path: '/users', headers: {} },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [ep]);
     expect(result[0]?.request.headers?.Authorization).toBe('Bearer {{API_TOKEN}}');
   });
 
   it('does not overwrite existing auth header', () => {
-    const input = [{
-      endpointId: 'GET::/users',
-      category: 'positive',
-      title: 'GET /users returns list',
-      request: { method: 'GET', path: '/users', headers: { Authorization: 'Bearer custom-token' } },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        endpointId: 'GET::/users',
+        category: 'positive',
+        title: 'GET /users returns list',
+        request: { method: 'GET', path: '/users', headers: { Authorization: 'Bearer custom-token' } },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [ep]);
     expect(result[0]?.request.headers?.Authorization).toBe('Bearer custom-token');
   });
 
   it('matches a test when the model returns a bare path as endpointId', () => {
-    const input = [{
-      endpointId: '/users',
-      category: 'positive',
-      title: 'GET /users returns the full list of users',
-      request: { method: 'GET', path: '/users' },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        endpointId: '/users',
+        category: 'positive',
+        title: 'GET /users returns the full list of users',
+        request: { method: 'GET', path: '/users' },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [ep]);
     expect(result).toHaveLength(1);
     expect(result[0]?.endpointId).toBe('GET::/users');
   });
 
   it('matches a test when the model returns "METHOD path" as endpointId', () => {
-    const input = [{
-      endpointId: 'GET /users',
-      category: 'positive',
-      title: 'GET /users returns the full list of users',
-      request: { method: 'GET', path: '/users' },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        endpointId: 'GET /users',
+        category: 'positive',
+        title: 'GET /users returns the full list of users',
+        request: { method: 'GET', path: '/users' },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [ep]);
     expect(result).toHaveLength(1);
     expect(result[0]?.endpointId).toBe('GET::/users');
   });
 
   it('matches via request method+path when endpointId is missing entirely', () => {
-    const input = [{
-      category: 'positive',
-      title: 'GET /users returns the full list of users',
-      request: { method: 'GET', path: '/users?page=1' },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        category: 'positive',
+        title: 'GET /users returns the full list of users',
+        request: { method: 'GET', path: '/users?page=1' },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [ep]);
     expect(result).toHaveLength(1);
     expect(result[0]?.endpointId).toBe('GET::/users');
@@ -303,26 +313,30 @@ describe('normalizeGeneratedTests', () => {
       auth: 'none',
       authHints: []
     });
-    const input = [{
-      endpointId: '/api/alerts/42/events',
-      category: 'positive',
-      title: 'GET events for alert 42 returns the event stream',
-      request: { method: 'GET', path: '/api/alerts/42/events' },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        endpointId: '/api/alerts/42/events',
+        category: 'positive',
+        title: 'GET events for alert 42 returns the event stream',
+        request: { method: 'GET', path: '/api/alerts/42/events' },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [paramEp]);
     expect(result).toHaveLength(1);
     expect(result[0]?.endpointId).toBe('GET::/api/alerts/:alert_id/events');
   });
 
   it('still drops a test that matches no endpoint by id or method+path', () => {
-    const input = [{
-      endpointId: 'POST::/unrelated',
-      category: 'positive',
-      title: 'POST /unrelated creates an unrelated resource',
-      request: { method: 'POST', path: '/unrelated' },
-      expected: { status: 201 }
-    }];
+    const input = [
+      {
+        endpointId: 'POST::/unrelated',
+        category: 'positive',
+        title: 'POST /unrelated creates an unrelated resource',
+        request: { method: 'POST', path: '/unrelated' },
+        expected: { status: 201 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [ep]);
     expect(result).toHaveLength(0);
   });
@@ -338,7 +352,10 @@ describe('assessGeneratedTestQuality — comprehensive', () => {
     method: 'DELETE',
     path: '/users/:id',
     auth: 'bearer',
-    responses: [{ status: '204', description: 'Deleted' }, { status: '404', description: 'Not found' }]
+    responses: [
+      { status: '204', description: 'Deleted' },
+      { status: '404', description: 'Not found' }
+    ]
   });
 
   it('flags unresolved path params when all paths still have placeholders', () => {

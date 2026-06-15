@@ -1,5 +1,7 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
+import { renderStatusAssertionPy } from '../statusExpectation';
+import { pyPathExpr } from './runtimeTokens';
 
 const toPyObject = (value: unknown): string => {
   return JSON.stringify(value ?? null, null, 2)
@@ -8,14 +10,45 @@ const toPyObject = (value: unknown): string => {
     .replace(/\bnull\b/g, 'None');
 };
 
-const toPyHeaderValue = (value: string): string =>
-  value === 'Bearer {{API_TOKEN}}'
-    ? `f"Bearer {os.getenv('API_TOKEN', 'replace-me')}"`
-    : value === '{{API_KEY}}'
-      ? `os.getenv('API_KEY', 'replace-me')`
-      : value === '{{CSRF_TOKEN}}'
-        ? `os.getenv('CSRF_TOKEN', 'replace-me')`
-    : JSON.stringify(value);
+const PLACEHOLDER_RE = /\{\{(\w+)\}\}/g;
+
+// Convert a header value into valid Python. Any `{{NAME}}` placeholder is resolved
+// from the environment at runtime so generated suites never send a literal
+// "{{token}}" string. Values without placeholders become plain string literals.
+const toPyHeaderValue = (value: string): string => {
+  if (!PLACEHOLDER_RE.test(value)) {
+    return JSON.stringify(value);
+  }
+  PLACEHOLDER_RE.lastIndex = 0;
+
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  let out = '';
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  // Escape any literal braces (not part of a placeholder) so the f-string is valid.
+  const escapeBraces = (segment: string): string => segment.replace(/\{/g, '{{').replace(/\}/g, '}}');
+  while ((match = PLACEHOLDER_RE.exec(escaped)) !== null) {
+    out += escapeBraces(escaped.slice(lastIndex, match.index));
+    out += `{os.getenv('${match[1]}', 'replace-me')}`;
+    lastIndex = match.index + match[0].length;
+  }
+  out += escapeBraces(escaped.slice(lastIndex));
+  return `f"${out}"`;
+};
+
+// Python identifiers allow only [A-Za-z0-9_]; collapse everything else so generated
+// function names (derived from URL paths) are always syntactically valid.
+const pySafeIdentifier = (value: string): string =>
+  value
+    .replace(/[^a-zA-Z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'test';
+
+// Build a Python URL expression for a path. Concatenation (not an f-string) avoids
+// brace-bearing paths like /users/{id} being interpreted as f-string fields, and any
+// {{NAME}} runtime placeholder is rendered as an os.getenv(...) read so real ids can be
+// injected via environment variables.
+const toPyUrl = (path: string): string => pyPathExpr(path, (literal) => JSON.stringify(literal));
 
 const toPyHeaders = (headers: Record<string, string>): string => {
   const entries = Object.entries(headers);
@@ -27,11 +60,6 @@ const toPyHeaders = (headers: Record<string, string>): string => {
         ${entries.map(([key, value]) => `${JSON.stringify(key)}: ${toPyHeaderValue(value)}`).join(',\n        ')}
     }`;
 };
-
-const toPyList = (value: unknown): string => JSON.stringify(value ?? [], null, 2)
-  .replace(/\btrue\b/g, 'True')
-  .replace(/\bfalse\b/g, 'False')
-  .replace(/\bnull\b/g, 'None');
 
 export class PytestFrameworkAdapter implements TestFrameworkAdapter {
   readonly framework = 'pytest' as const;
@@ -45,7 +73,10 @@ export class PytestFrameworkAdapter implements TestFrameworkAdapter {
       const key = `${pathMeta.resource}_${test.request.method.toLowerCase()}_${pathMeta.leaf}`;
       if (!grouped.has(key)) {
         grouped.set(key, []);
-        groupToPath.set(key, `tests/${pathMeta.resource}/test_${test.request.method.toLowerCase()}_${pathMeta.leaf}.py`);
+        groupToPath.set(
+          key,
+          `tests/${pathMeta.resource}/test_${test.request.method.toLowerCase()}_${pathMeta.leaf}.py`
+        );
       }
       grouped.get(key)?.push(test);
     }
@@ -53,12 +84,21 @@ export class PytestFrameworkAdapter implements TestFrameworkAdapter {
     return [...grouped.entries()].map(([groupKey, cases]) => {
       const fnBlocks = cases
         .map((testCase, index) => {
-          const fnName = `test_${groupKey}_${index + 1}`;
+          const fnName = pySafeIdentifier(`test_${groupKey}_${index + 1}`);
           const responseHeaders = toPyObject(testCase.expected.responseHeaders ?? {});
           const jsonSchema = toPyObject(testCase.expected.jsonSchema ?? null);
-          const contractChecks = toPyList(testCase.expected.contractChecks ?? []);
+          // Contract checks are free-text expectations (e.g. "auth boundary enforced") that
+          // cannot be auto-asserted; render them as documented expectations rather than a
+          // tautological `isinstance(check, str)` assertion that verifies nothing.
+          const contractChecks = testCase.expected.contractChecks?.length
+            ? testCase.expected.contractChecks
+                .map((value) => `    # Contract expectation (verify manually): ${String(value).replace(/\s+/g, ' ').trim()}`)
+                .join('\n')
+            : '    # No contract checks provided';
           const contains = testCase.expected.contains?.length
-            ? testCase.expected.contains.map((value) => `    assert ${JSON.stringify(value)} in response.text`).join('\n')
+            ? testCase.expected.contains
+                .map((value) => `    assert ${JSON.stringify(value)} in response.text`)
+                .join('\n')
             : '    # No content assertions provided';
           const contentType = testCase.expected.contentType
             ? `    assert ${JSON.stringify(testCase.expected.contentType)} in (response.headers.get('Content-Type') or '')`
@@ -73,7 +113,7 @@ export class PytestFrameworkAdapter implements TestFrameworkAdapter {
             ? `    assert is_paginated_shape(safe_json(response))`
             : '    # Pagination not asserted';
           const idempotencyCheck = testCase.expected.idempotent
-            ? `    repeat = requests.request(\n        method=${JSON.stringify(testCase.request.method)},\n        url=f"{BASE_URL}${testCase.request.path}",\n        headers=${toPyHeaders(testCase.request.headers ?? {})},\n        params=${toPyObject(testCase.request.query ?? {})},\n        json=${toPyObject(testCase.request.body ?? null)}\n    )\n    assert repeat.status_code < 500`
+            ? `    repeat = requests.request(\n        method=${JSON.stringify(testCase.request.method)},\n        url=${toPyUrl(testCase.request.path)},\n        headers=${toPyHeaders(testCase.request.headers ?? {})},\n        params=${toPyObject(testCase.request.query ?? {})},\n        json=${toPyObject(testCase.request.body ?? null)}\n    )\n    assert repeat.status_code < 500`
             : '    # Idempotency not asserted';
 
           return `def ${fnName}():
@@ -81,18 +121,17 @@ export class PytestFrameworkAdapter implements TestFrameworkAdapter {
     # Trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
     response = requests.request(
         method=${JSON.stringify(testCase.request.method)},
-        url=f"{BASE_URL}${testCase.request.path}",
+        url=${toPyUrl(testCase.request.path)},
         headers=${toPyHeaders(testCase.request.headers ?? {})},
         params=${toPyObject(testCase.request.query ?? {})},
         json=${toPyObject(testCase.request.body ?? null)}
     )
-    assert response.status_code == ${testCase.expected.status}
+${renderStatusAssertionPy(testCase, 'response.status_code', '    ')}
 ${contains}
 ${contentType}
 ${headerChecks}
 ${schemaChecks}
-    for contract_check in ${contractChecks}:
-        assert isinstance(contract_check, str)
+${contractChecks}
 ${paginationCheck}
 ${idempotencyCheck}
 `;
@@ -119,7 +158,7 @@ def safe_json(response):
         return None
 
 def is_paginated_shape(value):
-    return isinstance(value, list) or (isinstance(value, dict) and any(key in value for key in ('items', 'results', 'data')))
+    return isinstance(value, list) or (isinstance(value, dict) and (any(key in value for key in ('items', 'results', 'data')) or any(isinstance(v, list) for v in value.values())))
 
 def assert_schema_shape(schema, value, path='response'):
     if not schema:
@@ -128,7 +167,7 @@ def assert_schema_shape(schema, value, path='response'):
     if schema_type == 'array':
         assert isinstance(value, list)
         if schema.get('items') and value:
-            assert_schema_shape(schema['items'], value[0], ${"`f'{path}[0]'`"})
+            assert_schema_shape(schema['items'], value[0], f'{path}[0]')
         return
     if schema_type == 'object':
         assert isinstance(value, dict)
@@ -136,7 +175,7 @@ def assert_schema_shape(schema, value, path='response'):
             assert key in value
         for key, child in (schema.get('properties') or {}).items():
             if key in value:
-                assert_schema_shape(child, value[key], ${"`f'{path}.{key}'`"})
+                assert_schema_shape(child, value[key], f'{path}.{key}')
         return
     if schema_type == 'integer':
         assert isinstance(value, int) and not isinstance(value, bool)

@@ -1,5 +1,7 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
+import { renderStatusAssertionJs } from '../statusExpectation';
+import { jsTemplatePath } from './runtimeTokens';
 
 const toJsHeaderValue = (value: string): string =>
   value === 'Bearer {{API_TOKEN}}'
@@ -48,7 +50,6 @@ export class VitestFrameworkAdapter implements TestFrameworkAdapter {
           const requestHeaders = toJsHeadersObject(testCase.request.headers ?? {});
           const responseHeaders = JSON.stringify(testCase.expected.responseHeaders ?? {}, null, 2);
           const jsonSchema = toJsObject(testCase.expected.jsonSchema ?? null);
-          const contractChecks = JSON.stringify(testCase.expected.contractChecks ?? [], null, 2);
           const contains = testCase.expected.contains?.length
             ? testCase.expected.contains.map((value) => `  expect(text).toContain(${JSON.stringify(value)});`).join('\n')
             : '  // No content assertions provided';
@@ -61,14 +62,19 @@ export class VitestFrameworkAdapter implements TestFrameworkAdapter {
           const schemaChecks = testCase.expected.jsonSchema
             ? `  const parsed = safeJsonParse(text);\n  assertSchemaShape(${jsonSchema}, parsed, 'response');`
             : '  // No schema assertions provided';
+          // Contract checks are free-text expectations (e.g. "auth boundary enforced") that
+          // cannot be auto-asserted; render them as documented expectations rather than a
+          // tautological `typeof === 'string'` assertion that verifies nothing.
           const contractChecksBlock = testCase.expected.contractChecks?.length
-            ? `  for (const contractCheck of ${contractChecks}) {\n    expect(typeof contractCheck).toBe('string');\n  }`
+            ? testCase.expected.contractChecks
+                .map((value) => `  // Contract expectation (verify manually): ${String(value).replace(/\s+/g, ' ').trim()}`)
+                .join('\n')
             : '  // No contract checks provided';
           const paginationCheck = testCase.expected.pagination
             ? `  const parsedForPagination = safeJsonParse(text);\n  expect(isPaginatedShape(parsedForPagination)).toBe(true);`
             : '  // Pagination not asserted';
           const idempotencyCheck = testCase.expected.idempotent
-            ? `  const repeat = await fetch(\`${'${BASE_URL}'}${testCase.request.path}${'${query ? `?${query}` : ""}'}\`, {\n    method: ${JSON.stringify(testCase.request.method)},\n    headers: {\n      'Content-Type': 'application/json',\n      ...${requestHeaders}\n    },\n    body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined\n  });\n  expect(repeat.status).toBeLessThan(500);`
+            ? `  const repeat = await fetch(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {\n    method: ${JSON.stringify(testCase.request.method)},\n    headers: {\n      'Content-Type': 'application/json',\n      ...${requestHeaders}\n    },\n    body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined\n  });\n  expect(repeat.status).toBeLessThan(500);`
             : '  // Idempotency not asserted';
 
           return `test(${JSON.stringify(testCase.title)}, async () => {
@@ -83,7 +89,7 @@ export class VitestFrameworkAdapter implements TestFrameworkAdapter {
     }, {})
   ).toString();
 
-  const response = await fetch(\`${'${BASE_URL}'}${testCase.request.path}${'${query ? `?${query}` : ""}'}\`, {
+  const response = await fetch(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {
     method: ${JSON.stringify(testCase.request.method)},
     headers: {
       'Content-Type': 'application/json',
@@ -92,7 +98,7 @@ export class VitestFrameworkAdapter implements TestFrameworkAdapter {
     body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined
   });
 
-  expect(response.status).toBe(${testCase.expected.status});
+${renderStatusAssertionJs(testCase, 'response.status', '  ')}
   const text = await response.text();
 ${contains}
 ${contentType}
@@ -125,7 +131,8 @@ const safeJsonParse = (text) => {
 };
 
 const isPaginatedShape = (value) => Array.isArray(value)
-  || (value && typeof value === 'object' && ['items', 'results', 'data'].some((key) => key in value));
+  || (value && typeof value === 'object'
+    && (['items', 'results', 'data'].some((key) => key in value) || Object.values(value).some((entry) => Array.isArray(entry))));
 
 const assertSchemaShape = (schema, value, path = 'response') => {
   if (!schema) {

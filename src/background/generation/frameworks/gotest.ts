@@ -1,5 +1,7 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
+import { renderStatusAssertionGo } from '../statusExpectation';
+import { goPathExpr } from './runtimeTokens';
 
 const escapeBackticks = (value: string): string => value.replace(/`/g, '` + "`" + `');
 
@@ -93,7 +95,7 @@ export class GoTestFrameworkAdapter implements TestFrameworkAdapter {
 \t// ${testCase.category} coverage — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
 \tbaseURL := getEnv("API_BASE_URL", "http://localhost:3000")
 \t${bodyVar}
-\treq, err := http.NewRequest(${toGoString(testCase.request.method)}, baseURL + ${toGoString(testCase.request.path)}, bodyReader)
+\treq, err := http.NewRequest(${toGoString(testCase.request.method)}, baseURL + ${goPathExpr(testCase.request.path, toGoString)}, bodyReader)
 \tif err != nil { t.Fatalf("build request: %v", err) }
 \treq.Header.Set("Content-Type", "application/json")
 ${headers}
@@ -103,9 +105,7 @@ ${queryBlock}
 \tif err != nil { t.Fatalf("do request: %v", err) }
 \tdefer resp.Body.Close()
 \trespBody, _ := io.ReadAll(resp.Body)
-\tif resp.StatusCode != ${testCase.expected.status} {
-\t\tt.Errorf("status = %d, want ${testCase.expected.status}; body=%s", resp.StatusCode, string(respBody))
-\t}
+${renderStatusAssertionGo(testCase, 'resp.StatusCode', 'string(respBody)', '\t')}
 ${ctAssert}
 ${headerAsserts}
 ${containsAsserts}

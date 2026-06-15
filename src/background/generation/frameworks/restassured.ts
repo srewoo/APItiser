@@ -1,5 +1,7 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
+import { renderStatusAssertionJava } from '../statusExpectation';
+import { javaPathExpr } from './runtimeTokens';
 
 const javaString = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 
@@ -86,11 +88,11 @@ ${headerLines}
 ${queryLines}
 ${bodyLine}
 \t\t\t.when()
-\t\t\t.request(${javaString(testCase.request.method)}, ${javaString(testCase.request.path)})
+\t\t\t.request(${javaString(testCase.request.method)}, ${javaPathExpr(testCase.request.path, javaString)})
 \t\t\t.then()
 \t\t\t.extract().response();
 
-\t\tassertEquals(${testCase.expected.status}, response.getStatusCode(), "status mismatch; body=" + response.getBody().asString());
+${renderStatusAssertionJava(testCase, 'response.getStatusCode()', 'response.getBody().asString()', '\t\t')}
 \t\tString body = response.getBody().asString();
 ${ctAssert}
 ${headerAsserts}

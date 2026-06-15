@@ -10,7 +10,9 @@ const makeFile = (path: string, content: string): RepoFile => ({ path, content }
 
 describe('parseGoRoutes — gin nested groups', () => {
   it('resolves a two-level group chain to the full prefix', () => {
-    const file = makeFile('main.go', `
+    const file = makeFile(
+      'main.go',
+      `
 package main
 
 import "github.com/gin-gonic/gin"
@@ -22,7 +24,8 @@ func main() {
     v1.GET("/users", listUsers)
     v1.POST("/users", createUser)
 }
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes).toHaveLength(2);
     expect(routes[0]).toMatchObject({ method: 'GET', path: '/api/v1/users', source: 'gin' });
@@ -30,11 +33,14 @@ func main() {
   });
 
   it('still handles single-level groups', () => {
-    const file = makeFile('main.go', `
+    const file = makeFile(
+      'main.go',
+      `
 import "github.com/gin-gonic/gin"
 v1 := r.Group("/api/v1")
 v1.DELETE("/users/:id", deleteUser)
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes[0]).toMatchObject({ method: 'DELETE', path: '/api/v1/users/:id', source: 'gin' });
   });
@@ -46,7 +52,9 @@ v1.DELETE("/users/:id", deleteUser)
 
 describe('parseGoRoutes — chi', () => {
   it('detects capitalised method calls', () => {
-    const file = makeFile('routes.go', `
+    const file = makeFile(
+      'routes.go',
+      `
 package main
 
 import "github.com/go-chi/chi/v5"
@@ -56,7 +64,8 @@ func routes() {
     r.Get("/health", healthHandler)
     r.Post("/users", createUser)
 }
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes).toHaveLength(2);
     expect(routes[0]).toMatchObject({ method: 'GET', path: '/health', source: 'chi' });
@@ -64,7 +73,9 @@ func routes() {
   });
 
   it('applies Route prefixes to nested method calls and converts {id} to :id', () => {
-    const file = makeFile('routes.go', `
+    const file = makeFile(
+      'routes.go',
+      `
 import "github.com/go-chi/chi/v5"
 
 func routes() {
@@ -76,7 +87,8 @@ func routes() {
         })
     })
 }
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes).toHaveLength(2);
     expect(routes[0]).toMatchObject({ method: 'GET', path: '/api/users/:id', source: 'chi' });
@@ -90,7 +102,9 @@ func routes() {
 
 describe('parseGoRoutes — echo', () => {
   it('detects echo group-prefixed routes', () => {
-    const file = makeFile('server.go', `
+    const file = makeFile(
+      'server.go',
+      `
 package main
 
 import "github.com/labstack/echo/v4"
@@ -102,7 +116,8 @@ func main() {
     g.GET("/users/:id", getUser)
     g.POST("/users", createUser)
 }
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes).toHaveLength(3);
     expect(routes.map((r) => r.source)).toEqual(['echo', 'echo', 'echo']);
@@ -118,7 +133,9 @@ func main() {
 
 describe('parseGoRoutes — gorilla/mux', () => {
   it('emits one signal per method on .Methods()', () => {
-    const file = makeFile('router.go', `
+    const file = makeFile(
+      'router.go',
+      `
 package main
 
 import "github.com/gorilla/mux"
@@ -127,7 +144,8 @@ func setup() {
     r := mux.NewRouter()
     r.HandleFunc("/products", productsHandler).Methods("GET", "POST")
 }
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes).toHaveLength(2);
     const methods = routes.map((r) => r.method).sort();
@@ -136,14 +154,17 @@ func setup() {
   });
 
   it('resolves http.MethodGet constants and strips {id:[0-9]+} regex to :id (integer typed)', () => {
-    const file = makeFile('router.go', `
+    const file = makeFile(
+      'router.go',
+      `
 import "github.com/gorilla/mux"
 
 func setup() {
     r := mux.NewRouter()
     r.HandleFunc("/items/{id:[0-9]+}", itemHandler).Methods(http.MethodGet)
 }
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes).toHaveLength(1);
     expect(routes[0]).toMatchObject({ method: 'GET', path: '/items/:id', source: 'mux' });
@@ -157,7 +178,9 @@ func setup() {
 
 describe('parseGoRoutes — net/http pattern routing', () => {
   it('detects "METHOD /path/{param}" patterns', () => {
-    const file = makeFile('handlers.go', `
+    const file = makeFile(
+      'handlers.go',
+      `
 package main
 
 import "net/http"
@@ -167,7 +190,8 @@ func main() {
     mux.HandleFunc("GET /items/{id}", getItem)
     http.HandleFunc("POST /items", createItem)
 }
-`);
+`
+    );
     const routes = parseGoRoutes([file]);
     expect(routes).toHaveLength(2);
     expect(routes[0]).toMatchObject({ method: 'GET', path: '/items/:id', source: 'nethttp' });

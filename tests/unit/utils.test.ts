@@ -8,7 +8,11 @@ import { createId } from '@background/utils/id';
 
 describe('chunkArray', () => {
   it('splits an array into equal-sized chunks', () => {
-    expect(chunkArray([1, 2, 3, 4, 5, 6], 2)).toEqual([[1, 2], [3, 4], [5, 6]]);
+    expect(chunkArray([1, 2, 3, 4, 5, 6], 2)).toEqual([
+      [1, 2],
+      [3, 4],
+      [5, 6]
+    ]);
   });
 
   it('puts the remainder in the last chunk', () => {

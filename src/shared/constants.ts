@@ -4,14 +4,17 @@ export const STORAGE_KEY = 'apitiser.state.v1';
 export const HEARTBEAT_ALARM = 'apitiser.keepalive';
 
 export const PROVIDER_MODELS: Record<LLMProvider, string[]> = {
-  openai: ['gpt-4o', 'gpt-4.1-mini'],
-  claude: ['claude-sonnet-4-20250514', 'claude-3-7-sonnet-20250219'],
-  gemini: ['gemini-2.0-flash', 'gemini-1.5-pro']
+  // Latest first. Entries matching the reasoning patterns in modelCapabilities.ts
+  // (OpenAI o-series/gpt-5, Claude 4.x/Fable) have temperature omitted automatically.
+  openai: ['gpt-5', 'gpt-5-mini', 'o4-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o'],
+  claude: ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-7', 'claude-fable-5'],
+  gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']
 };
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   provider: 'openai',
   model: PROVIDER_MODELS.openai[0],
+  temperature: 0.2,
   framework: 'jest',
   includeCategories: ['positive', 'negative', 'edge'],
   testDirectories: ['tests', '__tests__', 'test'],

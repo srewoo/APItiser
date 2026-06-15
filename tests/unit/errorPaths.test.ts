@@ -24,7 +24,13 @@ describe('normalizeGeneratedTests — defensive behavior', () => {
 
   it('drops items with unknown endpointId', () => {
     const input = [
-      { endpointId: 'UNKNOWN', category: 'positive', title: 'bad', request: { method: 'GET', path: '/' }, expected: { status: 200 } }
+      {
+        endpointId: 'UNKNOWN',
+        category: 'positive',
+        title: 'bad',
+        request: { method: 'GET', path: '/' },
+        expected: { status: 200 }
+      }
     ];
     expect(normalizeGeneratedTests(input, ['positive'], [endpoint])).toHaveLength(0);
   });
@@ -47,29 +53,33 @@ describe('normalizeGeneratedTests — defensive behavior', () => {
   });
 
   it('falls back to unknown category as positive when not in allowed list', () => {
-    const input = [{
-      endpointId: 'GET::/users',
-      category: 'unknown-category',
-      title: 'gets users',
-      request: { method: 'GET', path: '/users' },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        endpointId: 'GET::/users',
+        category: 'unknown-category',
+        title: 'gets users',
+        request: { method: 'GET', path: '/users' },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input, ['positive'], [endpoint]);
     expect(result[0]?.category).toBe('positive');
   });
 
   it('normalizes non-string header values to strings', () => {
-    const input = [{
-      endpointId: 'GET::/users',
-      category: 'positive',
-      title: 'with weird headers',
-      request: {
-        method: 'GET',
-        path: '/users',
-        headers: { 'X-Version': 42, 'X-Active': true }
-      },
-      expected: { status: 200 }
-    }];
+    const input = [
+      {
+        endpointId: 'GET::/users',
+        category: 'positive',
+        title: 'with weird headers',
+        request: {
+          method: 'GET',
+          path: '/users',
+          headers: { 'X-Version': 42, 'X-Active': true }
+        },
+        expected: { status: 200 }
+      }
+    ];
     const result = normalizeGeneratedTests(input as unknown[], ['positive'], [endpoint]);
     expect(typeof result[0]?.request.headers?.['X-Version']).toBe('string');
     expect(typeof result[0]?.request.headers?.['X-Active']).toBe('string');
@@ -86,7 +96,10 @@ describe('assessGeneratedTestQuality — error detection', () => {
     method: 'POST',
     path: '/items',
     auth: 'bearer',
-    responses: [{ status: '200', description: 'OK' }, { status: '400', description: 'Bad Request' }]
+    responses: [
+      { status: '200', description: 'OK' },
+      { status: '400', description: 'Bad Request' }
+    ]
   });
 
   it('flags endpoints with no tests at all', () => {
@@ -167,7 +180,9 @@ describe('stateManager — handles corrupt storage gracefully', () => {
 
   it('returns default state when stored data is a plain string', async () => {
     const { STORAGE_KEY } = await import('@shared/constants');
-    const fake = (globalThis as unknown as { chrome: { storage: { local: { set(v: Record<string, unknown>): Promise<void> } } } }).chrome;
+    const fake = (
+      globalThis as unknown as { chrome: { storage: { local: { set(v: Record<string, unknown>): Promise<void> } } } }
+    ).chrome;
     await fake.storage.local.set({ [STORAGE_KEY]: 'this-is-not-valid-state' });
 
     const { loadState } = await import('@background/core/stateManager');
@@ -178,7 +193,9 @@ describe('stateManager — handles corrupt storage gracefully', () => {
 
   it('returns default state when stored data is null', async () => {
     const { STORAGE_KEY } = await import('@shared/constants');
-    const fake = (globalThis as unknown as { chrome: { storage: { local: { set(v: Record<string, unknown>): Promise<void> } } } }).chrome;
+    const fake = (
+      globalThis as unknown as { chrome: { storage: { local: { set(v: Record<string, unknown>): Promise<void> } } } }
+    ).chrome;
     await fake.storage.local.set({ [STORAGE_KEY]: null });
 
     const { loadState } = await import('@background/core/stateManager');

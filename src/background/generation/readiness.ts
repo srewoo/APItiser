@@ -35,7 +35,9 @@ export const assessReadiness = (
     };
   }
 
-  const heuristicCount = tests.filter((test) => test.trustLabel === 'heuristic' || (test.trustScore ?? 0) < 0.55).length;
+  // trustScore is normalized to a 1-99 integer scale (see qualityGate normalizeGeneratedTests),
+  // so the heuristic threshold must be ~55, not 0.55 — the old value made this branch dead code.
+  const heuristicCount = tests.filter((test) => test.trustLabel === 'heuristic' || (test.trustScore ?? 0) < 55).length;
   const strongAssertionCount = tests.filter(hasStrongAssertions).length;
   const notes: string[] = [];
 

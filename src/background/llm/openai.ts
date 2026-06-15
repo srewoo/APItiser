@@ -1,5 +1,6 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
 import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
+import { resolveTemperature, openAiTokenField } from './modelCapabilities';
 import { withRetry } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
@@ -28,6 +29,11 @@ export class OpenAiAdapter implements LLMProviderAdapter {
     });
     const systemPrompt = buildProviderSystemPrompt(this.provider, mode);
 
+    // Reasoning models (o-series, gpt-5 family) reject `temperature` and require
+    // `max_completion_tokens`; classic models take `temperature` + `max_tokens`.
+    const temperature = resolveTemperature(this.provider, options.model, options.temperature);
+    const tokenField = openAiTokenField(options.model);
+
     const content = await withRetry(
       async () => {
         const response = await fetchWithTimeout(
@@ -40,8 +46,8 @@ export class OpenAiAdapter implements LLMProviderAdapter {
             },
             body: JSON.stringify({
               model: options.model,
-              temperature: 0.2,
-              max_tokens: computeMaxOutputTokens(batch.length),
+              ...(temperature !== undefined ? { temperature } : {}),
+              [tokenField]: computeMaxOutputTokens(batch.length),
               response_format: { type: 'json_object' },
               messages: [
                 {

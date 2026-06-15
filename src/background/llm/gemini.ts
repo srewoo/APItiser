@@ -1,5 +1,6 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
 import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
+import { resolveTemperature } from './modelCapabilities';
 import { withRetry } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
@@ -28,6 +29,10 @@ export class GeminiAdapter implements LLMProviderAdapter {
     });
     const systemPrompt = buildProviderSystemPrompt(this.provider, mode);
 
+    // Gemini thinking models still accept temperature; resolveTemperature returns the
+    // configured value (defaulting to 0.2) for this provider.
+    const temperature = resolveTemperature(this.provider, options.model, options.temperature) ?? 0.2;
+
     const text = await withRetry(
       async () => {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(options.model)}:generateContent?key=${encodeURIComponent(options.apiKey)}`;
@@ -44,7 +49,7 @@ export class GeminiAdapter implements LLMProviderAdapter {
                 parts: [{ text: systemPrompt }]
               },
               generationConfig: {
-                temperature: 0.2,
+                temperature,
                 responseMimeType: 'application/json',
                 maxOutputTokens: computeMaxOutputTokens(batch.length)
               },

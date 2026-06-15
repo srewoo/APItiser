@@ -1,10 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { assessGeneratedTestQuality, generateTestSuite, normalizeGeneratedTests, repairTestsFromValidation } from '@background/generation/testGenerator';
-import type { ApiEndpoint, ExtensionSettings, GeneratedTestCase, GenerateContext, ProviderOptions } from '@shared/types';
+import {
+  assessGeneratedTestQuality,
+  generateTestSuite,
+  normalizeGeneratedTests,
+  repairTestsFromValidation
+} from '@background/generation/testGenerator';
+import type {
+  ApiEndpoint,
+  ExtensionSettings,
+  GeneratedTestCase,
+  GenerateContext,
+  ProviderOptions
+} from '@shared/types';
 
-const generateTestsMock = vi.fn<
-  (batch: ApiEndpoint[], context: GenerateContext, options: ProviderOptions) => Promise<{ tests: GeneratedTestCase[] }>
->();
+const generateTestsMock =
+  vi.fn<
+    (
+      batch: ApiEndpoint[],
+      context: GenerateContext,
+      options: ProviderOptions
+    ) => Promise<{ tests: GeneratedTestCase[] }>
+  >();
 
 vi.mock('@background/llm/client', () => ({
   loadProviderAdapter: async () => ({
@@ -165,6 +181,50 @@ describe('normalizeGeneratedTests', () => {
     expect(result.diagnostics[0].assessment.passed).toBe(false);
   });
 
+  it('backfills endpoints the main pass left uncovered (coverage-completion pass)', async () => {
+    const endpoints: ApiEndpoint[] = [
+      {
+        id: 'GET::/users',
+        method: 'GET',
+        path: '/users',
+        source: 'openapi',
+        auth: 'none',
+        pathParams: [],
+        queryParams: [],
+        responses: [{ status: '200' }]
+      }
+    ];
+
+    const validTest: GeneratedTestCase = {
+      endpointId: 'GET::/users',
+      category: 'positive',
+      title: 'lists users successfully',
+      request: { method: 'GET', path: '/users' },
+      expected: { status: 200 }
+    };
+
+    // Main pass: generate + 3 repair attempts all come back empty (simulating a truncated
+    // batch). The coverage-completion pass then re-requests the endpoint and succeeds.
+    generateTestsMock
+      .mockResolvedValueOnce({ tests: [] })
+      .mockResolvedValueOnce({ tests: [] })
+      .mockResolvedValueOnce({ tests: [] })
+      .mockResolvedValueOnce({ tests: [] })
+      .mockResolvedValue({ tests: [validTest] });
+
+    const result = await generateTestSuite({
+      settings: { ...baseSettings, includeCategories: ['positive'] },
+      repo: { platform: 'github', owner: 'acme', repo: 'demo' },
+      endpoints
+    });
+
+    // The endpoint that the main pass missed is covered after backfill, and the overall
+    // assessment passes — no lingering "Missing all tests" error.
+    expect(result.tests).toHaveLength(1);
+    expect(result.tests[0].endpointId).toBe('GET::/users');
+    expect(result.finalAssessment.passed).toBe(true);
+  });
+
   it('accepts repaired output and reports diagnostics through batch progress', async () => {
     const endpoints: ApiEndpoint[] = [
       {
@@ -251,11 +311,13 @@ describe('normalizeGeneratedTests', () => {
     expect(result.tests).toHaveLength(4);
     expect(result.diagnostics[0]?.repairAttempted).toBe(true);
     expect(result.diagnostics[0]?.assessment.passed).toBe(true);
-    expect(onBatchComplete).toHaveBeenCalledWith(expect.objectContaining({
-      batchDiagnostics: expect.objectContaining({
-        repairAttempted: true
+    expect(onBatchComplete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        batchDiagnostics: expect.objectContaining({
+          repairAttempted: true
+        })
       })
-    }));
+    );
   });
 
   it('preserves stronger assertions when validation repair returns a weaker replacement', async () => {
@@ -268,17 +330,19 @@ describe('normalizeGeneratedTests', () => {
         auth: 'bearer',
         pathParams: [{ name: 'id', required: true, type: 'integer' }],
         queryParams: [],
-        responses: [{
-          status: '200',
-          contentType: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['id'],
-            properties: {
-              id: { name: 'id', required: true, type: 'integer' }
+        responses: [
+          {
+            status: '200',
+            contentType: 'application/json',
+            schema: {
+              type: 'object',
+              required: ['id'],
+              properties: {
+                id: { name: 'id', required: true, type: 'integer' }
+              }
             }
           }
-        }]
+        ]
       }
     ];
 
@@ -426,8 +490,54 @@ describe('generateTestSuite heartbeat propagation', () => {
 
     expect(capturedOnHeartbeat).toBeDefined();
     await capturedOnHeartbeat!(5000);
-    expect(onBatchHeartbeat).toHaveBeenCalledWith(
-      expect.objectContaining({ attempt: 'generate', elapsedMs: 5000 })
-    );
+    expect(onBatchHeartbeat).toHaveBeenCalledWith(expect.objectContaining({ attempt: 'generate', phase: 'generate', elapsedMs: 5000 }));
+  });
+
+  it('reports phase "backfill" on heartbeats during the coverage-completion pass', async () => {
+    const ep: ApiEndpoint = {
+      id: 'GET::/users',
+      method: 'GET',
+      path: '/users',
+      source: 'openapi',
+      auth: 'none',
+      pathParams: [],
+      queryParams: [],
+      responses: [{ status: '200' }]
+    };
+    const validTest: GeneratedTestCase = {
+      endpointId: 'GET::/users',
+      category: 'positive',
+      title: 'lists users successfully',
+      request: { method: 'GET', path: '/users' },
+      expected: { status: 200 }
+    };
+
+    let calls = 0;
+    let backfillOnHeartbeat: ((elapsedMs: number) => Promise<void>) | undefined;
+    // Main pass (generate + 3 repairs) returns nothing; the backfill call succeeds and is
+    // where we capture the provider heartbeat.
+    generateTestsMock.mockImplementation(async (_batch, _ctx, opts: ProviderOptions) => {
+      calls += 1;
+      if (calls <= 4) {
+        return { tests: [] };
+      }
+      backfillOnHeartbeat = opts.onHeartbeat as (elapsedMs: number) => Promise<void>;
+      return { tests: [validTest] };
+    });
+
+    const onBatchHeartbeat = vi.fn().mockResolvedValue(undefined);
+
+    await generateTestSuite({
+      settings: { ...baseSettings, includeCategories: ['positive'] },
+      repo: { platform: 'github', owner: 'acme', repo: 'demo' },
+      endpoints: [ep],
+      onBatchHeartbeat
+    });
+
+    expect(backfillOnHeartbeat).toBeDefined();
+    await backfillOnHeartbeat!(3000);
+    // The backfill heartbeat must report phase 'backfill' so the UI shows a coverage
+    // message instead of a nonsensical "N/total" counter (e.g. "16/12").
+    expect(onBatchHeartbeat).toHaveBeenCalledWith(expect.objectContaining({ phase: 'backfill', elapsedMs: 3000 }));
   });
 });

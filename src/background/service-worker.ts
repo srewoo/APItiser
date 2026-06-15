@@ -28,6 +28,7 @@ import { buildCoverage } from './generation/coverage';
 import { suggestFramework } from './generation/frameworkSuggest';
 import { buildArtifactZip } from './generation/zipBuilder';
 import { assessReadiness } from './generation/readiness';
+import { assessGeneratedTestQuality } from './generation/qualityGate';
 import { buildPostmanCollection } from './generation/postmanExport';
 import { validateGeneratedTestsAgainstBaseUrl } from './generation/executionValidator';
 import {
@@ -331,6 +332,22 @@ const finalizeGeneration = async (
     state.settings.includeCategories
   );
 
+  // Quality gate reflects BOTH generation completeness and live validation:
+  //  - failed  : live validation ran and some tests failed against the API
+  //  - partial : some endpoints lack tests / a required category (error-severity gaps)
+  //  - passed  : every endpoint has the required coverage (and validation, if run, passed)
+  // Skipping validation alone is NOT a failure — that's surfaced via readiness instead.
+  const generationAssessment = assessGeneratedTestQuality(
+    packaging.endpoints,
+    tests,
+    state.settings.includeCategories
+  );
+  const qualityStatus: JobState['qualityStatus'] = validationSummary?.failed
+    ? 'failed'
+    : generationAssessment.passed
+      ? 'passed'
+      : 'partial';
+
   const complete: JobState = {
     ...packaging,
     stage: 'complete',
@@ -338,7 +355,7 @@ const finalizeGeneration = async (
     statusText: `Completed with ${coverage.testsGenerated} tests • ${readinessAssessment.readiness.replace(/_/g, ' ')}`,
     coverage,
     generatedTests: tests,
-    qualityStatus: validationSummary?.failed || validationSummary?.notRunReason ? 'failed' : 'passed',
+    qualityStatus,
     validationSummary,
     readiness: readinessAssessment.readiness,
     readinessNotes: readinessAssessment.notes,
@@ -407,9 +424,12 @@ const executeGeneration = async (
           const elapsedSec = Math.round(heartbeat.elapsedMs / 1000);
           const currentState = await loadState(contextKey);
           const currentJob = currentState.activeJob ?? job;
+          const statusText = heartbeat.phase === 'backfill'
+            ? `Backfilling coverage for untested endpoints — ${elapsedSec}s elapsed (${heartbeat.attempt})`
+            : `Generating batch ${heartbeat.currentBatch + 1}/${heartbeat.totalBatches} — ${elapsedSec}s elapsed (${heartbeat.attempt})`;
           const beating: JobState = {
             ...currentJob,
-            statusText: `Generating batch ${heartbeat.currentBatch + 1}/${heartbeat.totalBatches} — ${elapsedSec}s elapsed (${heartbeat.attempt})`,
+            statusText,
             updatedAt: Date.now()
           };
           emitProgress(await replaceActiveJob(beating, contextKey), contextKey);
@@ -429,7 +449,7 @@ const executeGeneration = async (
       finalJob = {
         ...currentJob,
         batchDiagnostics: mergedDiagnostics,
-        qualityStatus: 'passed'
+        qualityStatus: generationResult.finalAssessment.passed ? 'passed' : 'partial'
       };
     }
 

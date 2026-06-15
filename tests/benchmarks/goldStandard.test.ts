@@ -194,7 +194,12 @@ paths:
         endpointId: 'GET::/reports',
         category: 'positive',
         title: 'lists reports with bearer auth',
-        request: { method: 'GET', path: '/reports', query: { page: 1 }, headers: { Authorization: 'Bearer {{API_TOKEN}}' } },
+        request: {
+          method: 'GET',
+          path: '/reports',
+          query: { page: 1 },
+          headers: { Authorization: 'Bearer {{API_TOKEN}}' }
+        },
         expected: {
           status: 200,
           contentType: 'application/json',
@@ -252,52 +257,53 @@ paths:
   }
 ];
 
-const buildFetchStub = () => vi.fn(async (input: RequestInfo | URL) => {
-  const url = typeof input === 'string' ? input : input.toString();
+const buildFetchStub = () =>
+  vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input.toString();
 
-  if (url.includes('/auth/login')) {
+    if (url.includes('/auth/login')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => JSON.stringify({ token: 'runtime-token' })
+      };
+    }
+
+    if (url.includes('/users/1')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => JSON.stringify({ id: 1 })
+      };
+    }
+
+    if (url.includes('/api/orders')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => JSON.stringify({ data: [{ id: 1 }], nextCursor: 'abc' })
+      };
+    }
+
+    if (url.includes('/reports')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => JSON.stringify({ items: [{ id: 1 }], total: 1 })
+      };
+    }
+
     return {
       ok: true,
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
-      text: async () => JSON.stringify({ token: 'runtime-token' })
+      text: async () => JSON.stringify({})
     };
-  }
-
-  if (url.includes('/users/1')) {
-    return {
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      text: async () => JSON.stringify({ id: 1 })
-    };
-  }
-
-  if (url.includes('/api/orders')) {
-    return {
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      text: async () => JSON.stringify({ data: [{ id: 1 }], nextCursor: 'abc' })
-    };
-  }
-
-  if (url.includes('/reports')) {
-    return {
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      text: async () => JSON.stringify({ items: [{ id: 1 }], total: 1 })
-    };
-  }
-
-  return {
-    ok: true,
-    status: 200,
-    headers: new Headers({ 'content-type': 'application/json' }),
-    text: async () => JSON.stringify({})
-  };
-});
+  });
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -348,7 +354,9 @@ describe('gold-standard benchmark fixtures', () => {
       });
     }
 
-    const validatedFixtures = metrics.filter((metric) => ['validated', 'production_candidate'].includes(metric.readiness)).length;
+    const validatedFixtures = metrics.filter((metric) =>
+      ['validated', 'production_candidate'].includes(metric.readiness)
+    ).length;
     const aggregatePassRate = metrics.reduce((total, metric) => total + metric.passRate, 0) / metrics.length;
     const manualEdits = metrics.reduce((total, metric) => total + metric.manualEditsRequired, 0);
 

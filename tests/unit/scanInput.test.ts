@@ -19,10 +19,7 @@ describe('applyOpenApiFallback', () => {
   });
 
   it('updates existing fallback file rather than duplicating', () => {
-    const result = applyOpenApiFallback(
-      [{ path: 'openapi.manual.yaml', content: 'openapi: 3.0.0' }],
-      'openapi: 3.1.0'
-    );
+    const result = applyOpenApiFallback([{ path: 'openapi.manual.yaml', content: 'openapi: 3.0.0' }], 'openapi: 3.1.0');
 
     expect(result.files).toHaveLength(1);
     expect(result.files[0].content).toBe('openapi: 3.1.0');
