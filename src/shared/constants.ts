@@ -32,6 +32,16 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   runtimeApiKey: '',
   runtimeCsrfToken: '',
   runtimeSessionCookie: '',
+  runtimeSecondaryApiToken: '',
+  runtimeSecondaryApiKey: '',
+  runtimeSecondarySessionCookie: '',
   runtimeAuthMode: 'none',
+  retryOnRateLimit: true,
+  maxRetries: 2,
+  enableLocalRunner: false,
+  localRunnerHostName: 'com.apitiser.localrunner',
+  localRepoPath: '',
+  localRunPort: 8080,
+  localRunBootTimeoutMs: 180_000,
   runtimeSetupSteps: []
 };

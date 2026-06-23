@@ -8,9 +8,46 @@
  * token from its runtime-value registry. These helpers emit the per-language code for that.
  */
 
+import type { GeneratedTestCase, RequestIdentity } from '@shared/types';
+
 const RUNTIME_TOKEN_RE = /\{\{(\w+)\}\}/g;
 
 export const hasRuntimeToken = (path: string): boolean => /\{\{\w+\}\}/.test(path);
+
+const AUTH_HEADER_RE = /^(authorization|cookie|x-api-key|x-csrf-token|csrf-token)$/i;
+
+/**
+ * The headers a generated test should send for its identity:
+ *  - `none`: strip all auth headers (deliberately unauthenticated).
+ *  - `secondary`: send the foreign identity's bearer token (env API_TOKEN_SECONDARY).
+ *  - `primary`/undefined: the headers as generated (auth already injected).
+ */
+export const identityHeaders = (testCase: GeneratedTestCase): Record<string, string> => {
+  const identity: RequestIdentity = testCase.request.identity ?? 'primary';
+  const base = { ...(testCase.request.headers ?? {}) };
+  if (identity === 'none') {
+    return Object.fromEntries(Object.entries(base).filter(([key]) => !AUTH_HEADER_RE.test(key)));
+  }
+  if (identity === 'secondary') {
+    return { ...base, Authorization: 'Bearer {{API_TOKEN_SECONDARY}}' };
+  }
+  return base;
+};
+
+/**
+ * A JS expression for a header value. Any `{{NAME}}` placeholder becomes an env read so the
+ * generated suite is environment-backed (covers auth tokens and arbitrary runtime values).
+ */
+export const jsHeaderValueExpr = (value: string): string => {
+  if (!hasRuntimeToken(value)) {
+    return JSON.stringify(value);
+  }
+  const tmpl = value
+    .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
+    .replace(RUNTIME_TOKEN_RE, (_match, name: string) => '${process.env.' + name + " || 'replace-me'}");
+  return '`' + tmpl + '`';
+};
 
 /**
  * Path text for embedding inside an existing JS template literal (jest/vitest/mocha/

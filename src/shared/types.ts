@@ -105,7 +105,20 @@ export interface EndpointEvidence {
   reason: string;
 }
 
-export interface SchemaField {
+export interface SchemaConstraints {
+  /** Allowed values (OpenAPI `enum`). A value outside this set is invalid. */
+  enum?: unknown[];
+  /** Inclusive numeric bounds. */
+  minimum?: number;
+  maximum?: number;
+  /** String length bounds. */
+  minLength?: number;
+  maxLength?: number;
+  /** RegExp source (OpenAPI `pattern`) the string value must match. */
+  pattern?: string;
+}
+
+export interface SchemaField extends SchemaConstraints {
   name: string;
   required: boolean;
   type: string;
@@ -114,7 +127,7 @@ export interface SchemaField {
   example?: unknown;
 }
 
-export interface SchemaObject {
+export interface SchemaObject extends SchemaConstraints {
   type: string;
   required?: string[];
   properties?: Record<string, SchemaObject | SchemaField>;
@@ -183,6 +196,49 @@ export interface RepoValidationResult {
   checks: RepoValidationCheck[];
 }
 
+/**
+ * Which credential set a test executes with. `primary` is the normal authenticated
+ * identity; `secondary` is a second, lower-privilege/foreign identity used to prove
+ * authorization boundaries (IDOR); `none` deliberately sends no auth.
+ */
+export type RequestIdentity = 'primary' | 'secondary' | 'none';
+
+export type BodyAssertionOp =
+  | 'equals'
+  | 'contains'
+  | 'exists'
+  | 'absent'
+  | 'type'
+  | 'matches'
+  | 'gt'
+  | 'lt'
+  | 'gte'
+  | 'lte'
+  | 'in'
+  | 'length';
+
+/**
+ * A machine-checkable assertion against the response body. `path` is a dot/bracket JSON
+ * path (e.g. `data.items[0].id`); an empty path targets the whole body. These replace the
+ * old free-text `contractChecks` as the *executable* contract — they are asserted by live
+ * validation and rendered as real assertions in every framework.
+ */
+export interface BodyAssertion {
+  path: string;
+  op: BodyAssertionOp;
+  /** Comparison value (for equals/contains/matches/gt/lt/in/type/length). */
+  value?: unknown;
+  /** Optional human description of the invariant, surfaced as a code comment. */
+  description?: string;
+}
+
+/** Whether an assertion field was supplied by the model or filled by the normalizer. */
+export interface AssertionProvenance {
+  schemaFromModel: boolean;
+  contractFromModel: boolean;
+  bodyAssertionsFromModel: boolean;
+}
+
 export interface GeneratedTestCase {
   endpointId: string;
   category: TestCategory;
@@ -190,12 +246,20 @@ export interface GeneratedTestCase {
   rationale?: string;
   trustScore?: number;
   trustLabel?: TrustLabel;
+  /** Ordering hint for lifecycle sequencing (setup/create < use < teardown). Lower runs first. */
+  order?: number;
+  /** True when this test creates a resource other tests depend on. */
+  isSetup?: boolean;
+  /** True when this test tears down a resource created earlier in the suite. */
+  isTeardown?: boolean;
   request: {
     method: string;
     path: string;
     headers?: Record<string, string>;
     query?: Record<string, unknown>;
     body?: unknown;
+    /** Identity to execute with. Defaults to `primary` when omitted. */
+    identity?: RequestIdentity;
   };
   expected: {
     status: number;
@@ -203,7 +267,10 @@ export interface GeneratedTestCase {
     contentType?: string;
     responseHeaders?: Record<string, string>;
     jsonSchema?: SchemaObject;
+    /** Free-text human notes only. NOT executed — see `bodyAssertions` for the real contract. */
     contractChecks?: string[];
+    /** Executable, field-level response assertions. */
+    bodyAssertions?: BodyAssertion[];
     pagination?: boolean;
     idempotent?: boolean;
   };
@@ -273,8 +340,42 @@ export interface ExtensionSettings {
   runtimeCsrfToken?: string;
   /** Runtime session cookie value used for live validation */
   runtimeSessionCookie?: string;
+  /**
+   * Secondary identity credentials. A second, lower-privilege/foreign user used to prove
+   * authorization boundaries (IDOR): the suite requests another identity's resource with
+   * these credentials and asserts it is denied. When absent, IDOR tests downgrade to an
+   * unauthenticated check.
+   */
+  runtimeSecondaryApiToken?: string;
+  runtimeSecondaryApiKey?: string;
+  runtimeSecondarySessionCookie?: string;
   /** Auth mode used when executing live validation flows */
   runtimeAuthMode?: RuntimeAuthMode;
+  /** Retry transient 429/5xx responses during live validation (and in generated suites). */
+  retryOnRateLimit?: boolean;
+  /** Maximum retry attempts for transient responses. Defaults to 2. */
+  maxRetries?: number;
+  /**
+   * Local-runner integration. When enabled, "Run locally" asks the native messaging host to
+   * boot the repo's service via runLocal, then validates the generated suite against it.
+   * Requires the one-time native host install (see native-host/INSTALL.md).
+   */
+  enableLocalRunner?: boolean;
+  /** Native messaging host name. Defaults to com.apitiser.localrunner. */
+  localRunnerHostName?: string;
+  /** Absolute path to the repo on disk that the host should boot. */
+  localRepoPath?: string;
+  /** Port the local service should listen on (also the validation base URL port). */
+  localRunPort?: number;
+  /** Absolute path to runLocal's run-local.sh (host falls back to its bundled copy). */
+  runLocalScriptPath?: string;
+  /** Optional run-command / stack overrides forwarded to runLocal. */
+  localRunCmd?: string;
+  localRunStack?: string;
+  /** Command used to run the repo's OWN existing tests (auto-detected when blank). */
+  localTestCommand?: string;
+  /** Max time to allow for install + boot. Defaults to 180000ms. */
+  localRunBootTimeoutMs?: number;
   /** Optional explicit setup/login flow executed before live validation */
   runtimeSetupSteps?: RuntimeSetupStep[];
   /**
@@ -304,6 +405,7 @@ export interface QualityIssue {
     | 'provider-output'
     | 'schema-assertion'
     | 'contract-assertion'
+    | 'weak-assertions'
     | 'execution-status'
     | 'execution-body'
     | 'execution-auth';
@@ -433,6 +535,18 @@ export interface JobState {
   readinessNotes?: string[];
   /** Framework suggested from the detected route sources (advisory; does not override settings). */
   suggestedFramework?: TestFramework;
+  /**
+   * Result of the last LOCAL test run via the native runner — either the APItiser-generated
+   * suite (`generated`) or the repo's own existing tests (`repo`). Exit code 0 = passed.
+   */
+  localTestRun?: {
+    kind: 'generated' | 'repo';
+    exitCode: number;
+    passed: boolean;
+    command?: string;
+    durationMs?: number;
+    ranAt: number;
+  };
 }
 
 export interface AppState {

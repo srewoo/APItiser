@@ -41,7 +41,13 @@ const summarizeBody = (body: ApiEndpoint['body']): Record<string, unknown> | und
         type: value.type,
         required: value.required,
         format: value.format,
-        description: value.description
+        description: value.description,
+        enum: value.enum,
+        minimum: value.minimum,
+        maximum: value.maximum,
+        minLength: value.minLength,
+        maxLength: value.maxLength,
+        pattern: value.pattern
       };
       return acc;
     }
@@ -187,7 +193,8 @@ const baseConstraints = (context: GenerateContext) => ({
           path: 'string',
           headers: 'record<string,string>',
           query: 'record<string,unknown>',
-          body: 'unknown'
+          body: 'unknown',
+          identity: "'primary'|'secondary'|'none' (omit for primary)"
         },
         expected: {
           status: 'number',
@@ -195,7 +202,8 @@ const baseConstraints = (context: GenerateContext) => ({
           contentType: 'string',
           responseHeaders: 'record<string,string>',
           jsonSchema: 'schema-object',
-          contractChecks: 'string[]',
+          contractChecks: 'string[] (human notes only)',
+          bodyAssertions: "[{path:'data.id', op:'exists|equals|type|contains|matches|gt|lt|gte|lte|in|length|absent', value?:unknown}]",
           pagination: 'boolean',
           idempotent: 'boolean'
         }
@@ -249,7 +257,9 @@ export const buildPrompt = (batch: ApiEndpoint[], context: GenerateContext): str
     'For positive tests, add jsonSchema when a response schema is available and include contentType when known.',
     'Mark pagination=true when validating list endpoints with page/limit/cursor semantics.',
     'Mark idempotent=true for GET/PUT/DELETE/HEAD/OPTIONS tests that should be safely repeatable.',
-    'Add contractChecks that describe key response invariants such as required fields, array/object shape, or auth boundary expectations.',
+    'Prefer EXECUTABLE bodyAssertions over free-text contractChecks. Each bodyAssertion has a JSON path (e.g. "data.id" or "" for the whole body), an op, and an optional value, and is asserted against the parsed response — ground every path and value in observedExamples or the documented response schema. Use contractChecks only for human notes that cannot be auto-checked.',
+    'For security tests, set request.identity: use "none" to send NO credentials (expect 401/403), and "secondary" to send a DIFFERENT user\'s credentials to prove object-level authorization / IDOR (expect 403/404). Use injection-style payloads (SQL, XSS, path traversal) in string inputs for negative tests and assert they are rejected or not reflected.',
+    'Add contractChecks ONLY as free-text human notes (they are not executed).',
     'Do not output duplicate tests.',
     'Make titles specific and endpoint-aware.',
     ...(context.customPromptInstructions ? [`Custom Instructions: ${context.customPromptInstructions}`] : []),

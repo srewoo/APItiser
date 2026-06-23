@@ -20,6 +20,7 @@ import { notify } from './core/notifier';
 import { registerKeepAliveListener, startKeepAlive, stopKeepAlive } from './core/keepAlive';
 import { createId } from './utils/id';
 import { parseApiMap } from './parser/apiParser';
+import { consolidateAuth } from './parser/authConsolidation';
 import { applyOpenApiFallback } from './parser/scanInput';
 import { detectExistingTestCoverage } from './parser/testCoverageDetector';
 import { scanRepositoryFiles } from './repo/scanner';
@@ -31,6 +32,10 @@ import { assessReadiness } from './generation/readiness';
 import { assessGeneratedTestQuality } from './generation/qualityGate';
 import { buildPostmanCollection } from './generation/postmanExport';
 import { validateGeneratedTestsAgainstBaseUrl } from './generation/executionValidator';
+import { bootRepoService, pingHost, runRepoTests, runGeneratedSuite } from './runner/localRunner';
+import { suiteCommandsFor } from './runner/suiteCommands';
+import { buildRunnerZipBase64, runnerZipFileName } from './runner/runnerPackage';
+import { getPlatform } from '@shared/platform';
 import {
   applyGenerationProgressToJob,
   generateTestSuite,
@@ -40,6 +45,7 @@ import {
 
 const generationAbortControllers = new Map<string, AbortController>();
 const scanAbortControllers = new Map<string, AbortController>();
+const localRunAbortControllers = new Map<string, AbortController>();
 const generationInFlightContexts = new Set<string>();
 const scanInFlightContexts = new Set<string>();
 const cancelledContexts = new Set<string>();
@@ -617,7 +623,9 @@ const runScanPipeline = async (
 
     await checkpoint(parsingJob, contextKey);
 
-    const endpoints = parseApiMap(withFallback.files);
+    // Consolidate auth to the repo's dominant scheme so one API doesn't get bearer on one
+    // endpoint, cookie on another — a frequent per-endpoint mis-detection.
+    const endpoints = consolidateAuth(parseApiMap(withFallback.files)).endpoints;
     const existingTestEndpointIds = detectExistingTestCoverage(withFallback.files, endpoints, state.settings.testDirectories);
     const eligibleEndpointCount = state.settings.skipExistingTests
       ? Math.max(endpoints.length - existingTestEndpointIds.length, 0)
@@ -690,7 +698,11 @@ const handleStartGeneration = async (
 ): Promise<AppState> => {
   const contextId = resolveContextId(command.contextId);
   const state = await loadState(contextId);
-  if (!state.activeJob?.repo || state.activeJob.endpoints.length === 0) {
+  // After a job completes it moves to history and activeJob becomes null. Fall back to the
+  // most recent job so re-generating works on the existing scan without forcing a rescan —
+  // but only a cleanly-finished job, never a cancelled/errored one left in history.
+  const baseJob = state.activeJob ?? (isRunnableHistoryJob(state.jobHistory[0]) ? state.jobHistory[0] : undefined);
+  if (!baseJob?.repo || baseJob.endpoints.length === 0) {
     throw new Error('No scanned endpoints available. Run Scan Repo first.');
   }
 
@@ -702,10 +714,10 @@ const handleStartGeneration = async (
   const selectedEndpointIds = command.payload?.selectedEndpointIds ?? [];
   const selectedEndpointSet = hasExplicitSelection ? new Set(selectedEndpointIds) : null;
   const selectedEndpoints = hasExplicitSelection
-    ? state.activeJob.endpoints.filter((endpoint) => selectedEndpointSet?.has(endpoint.id))
-    : state.activeJob.endpoints;
+    ? baseJob.endpoints.filter((endpoint) => selectedEndpointSet?.has(endpoint.id))
+    : baseJob.endpoints;
 
-  const existingCovered = new Set(state.activeJob.existingTestEndpointIds ?? []);
+  const existingCovered = new Set(baseJob.existingTestEndpointIds ?? []);
   const endpointsToGenerate = state.settings.skipExistingTests
     ? selectedEndpoints.filter((endpoint) => !existingCovered.has(endpoint.id))
     : selectedEndpoints;
@@ -718,7 +730,7 @@ const handleStartGeneration = async (
   }
 
   const generating: JobState = {
-    ...state.activeJob,
+    ...baseJob,
     stage: 'generating',
     statusText: `Generating tests for ${endpointsToGenerate.length} endpoints`,
     progress: 65,
@@ -734,13 +746,234 @@ const handleStartGeneration = async (
     resumedFromCheckpoint: false,
     updatedAt: Date.now(),
     timings: {
-      ...state.activeJob.timings,
+      ...baseJob.timings,
       generationStartedAt: Date.now()
     }
   };
 
   await checkpoint(generating, contextId);
   return await executeGeneration(state, generating, endpointsToGenerate, 0, [], contextId);
+};
+
+/**
+ * A history job is safe to re-use as a base (for re-generation or "run locally") only if it
+ * ended cleanly. `completeJob` pushes EVERY terminal job to history — including cancelled and
+ * errored ones — so the fallback must exclude those rather than silently resurrect them.
+ */
+const isRunnableHistoryJob = (job?: JobState): job is JobState =>
+  Boolean(job && (job.stage === 'complete' || job.stage === 'idle'));
+
+/**
+ * Boot the configured repo's service via the native host (runLocal), validate the already
+ * generated suite against http://localhost:<port>, finalize with the live results, then tear
+ * the service down. This is the "generate → run" loop without the dev starting anything by hand.
+ */
+const handleRunLocally = async (contextId: string): Promise<AppState> => {
+  const state = await loadState(contextId);
+  // Generation completes by moving the job to history (activeJob → null); fall back to the
+  // most recent job so "Run Locally" works on the just-generated suite without a rescan — but
+  // only a job that actually finished cleanly (never a cancelled/errored one from history).
+  const job = state.activeJob ?? (isRunnableHistoryJob(state.jobHistory[0]) ? state.jobHistory[0] : undefined);
+  if (!job || !(job.generatedTests?.length)) {
+    throw new Error('Generate tests first, then run them locally.');
+  }
+  if (!state.settings.enableLocalRunner) {
+    throw new Error('Local runner is disabled. Enable it in Settings and install the native host (native-host/INSTALL.md).');
+  }
+  const repoPath = state.settings.localRepoPath?.trim();
+  if (!repoPath) {
+    throw new Error('Set the local repo path in Settings before running locally.');
+  }
+  if (localRunAbortControllers.has(contextId)) {
+    throw new Error('A local run is already in progress.');
+  }
+
+  const port = state.settings.localRunPort ?? 8080;
+  const controller = new AbortController();
+  localRunAbortControllers.set(contextId, controller);
+  cancelledContexts.delete(contextId);
+
+  // Status writes are fire-and-forget but SERIALIZED on a chain, and gated by `runActive`, so a
+  // late throttled log update can never land after the run finalizes (which would revert the
+  // completed job back to a stale "validating" state).
+  let runActive = true;
+  let statusChain: Promise<unknown> = Promise.resolve();
+  const pushStatus = (statusText: string): void => {
+    statusChain = statusChain.then(() =>
+      runActive
+        ? checkpoint({ ...job, stage: 'validating', statusText, updatedAt: Date.now() }, contextId).catch(() => undefined)
+        : undefined
+    );
+  };
+
+  // Booting + installing deps can take minutes; without a keep-alive the MV3 service worker is
+  // suspended mid-wait and the UI freezes with no result. Hold it open for the whole run.
+  const holdKey = `runlocal:${contextId}`;
+  await acquireKeepAlive(holdKey);
+
+  pushStatus('Starting local service via runLocal…');
+  let lastLogAt = 0;
+
+  let handle: Awaited<ReturnType<typeof bootRepoService>> | null = null;
+  try {
+    handle = await bootRepoService(getPlatform().native, {
+      hostName: state.settings.localRunnerHostName,
+      repoPath,
+      port,
+      runLocalScriptPath: state.settings.runLocalScriptPath,
+      cmd: state.settings.localRunCmd,
+      stack: state.settings.localRunStack,
+      bootTimeoutMs: state.settings.localRunBootTimeoutMs,
+      onStatus: (phase, message) => pushStatus(`Local runner: ${message ?? phase}`),
+      // Surface runLocal's own output (install progress, errors) so a long boot shows life
+      // instead of a frozen status. Throttled to avoid a storage write per log line.
+      onLog: (line) => {
+        const now = Date.now();
+        if (now - lastLogAt > 1500) {
+          lastLogAt = now;
+          pushStatus(`runLocal: ${line.slice(0, 100)}`);
+        }
+      }
+    });
+
+    if (controller.signal.aborted || isContextCancelled(contextId)) {
+      return await loadState(contextId);
+    }
+
+    // Boot is up — now run the GENERATED suite via its own framework runner against the live
+    // service (no in-extension HTTP firing, no auth settings). The suite's env (API_BASE_URL,
+    // and any tokens the user exports) handles credentials, not the extension.
+    pushStatus(`Service ready on ${handle.baseUrl} — running the generated suite…`);
+    const files = renderGeneratedFiles(state.settings, job.repo!, job.endpoints.length, job.generatedTests)
+      .map((file) => ({ path: file.path, content: file.content }));
+    const cmds = suiteCommandsFor(state.settings.framework);
+    const result = await runGeneratedSuite(getPlatform().native, {
+      hostName: state.settings.localRunnerHostName,
+      files,
+      installCmd: cmds.install,
+      testCmd: cmds.test,
+      port: handle.port, // the ACTUAL booted port (host may auto-detect e.g. 8000 from compose)
+      timeoutMs: state.settings.localRunBootTimeoutMs,
+      onStatus: (_phase, message) => pushStatus(`Suite: ${message ?? 'running'}`),
+      onLog: (line) => {
+        const now = Date.now();
+        if (now - lastLogAt > 1500) {
+          lastLogAt = now;
+          pushStatus(`suite: ${line.slice(0, 100)}`);
+        }
+      }
+    });
+
+    runActive = false;
+    await statusChain;
+    if (controller.signal.aborted || isContextCancelled(contextId)) {
+      return await loadState(contextId);
+    }
+
+    const ranJob: JobState = {
+      ...job,
+      stage: job.stage === 'complete' ? 'complete' : 'idle',
+      statusText: result.passed
+        ? `Generated suite passed (${result.command ?? state.settings.framework})`
+        : `Generated suite: exit ${result.exitCode} (${result.command ?? state.settings.framework})`,
+      localTestRun: { kind: 'generated', ...result, ranAt: Date.now() },
+      updatedAt: Date.now()
+    };
+    return await checkpoint(ranJob, contextId);
+  } catch (error) {
+    if (controller.signal.aborted || isContextCancelled(contextId)) {
+      return await loadState(contextId);
+    }
+    throw error;
+  } finally {
+    runActive = false;
+    handle?.stop();
+    await releaseKeepAlive(holdKey);
+    localRunAbortControllers.delete(contextId);
+  }
+};
+
+/**
+ * Run the repo's OWN existing test suite locally (pytest/npm test/go test/…) via the native
+ * host and record the pass/fail result on the job. Independent of the generated suite — this
+ * just exercises the tests already in the repo.
+ */
+const handleRunRepoTests = async (contextId: string): Promise<AppState> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? (isRunnableHistoryJob(state.jobHistory[0]) ? state.jobHistory[0] : undefined);
+  if (!job) {
+    throw new Error('Scan a repo first.');
+  }
+  if (!state.settings.enableLocalRunner) {
+    throw new Error('Local runner is disabled. Enable it in Settings and install the native host.');
+  }
+  const repoPath = state.settings.localRepoPath?.trim();
+  if (!repoPath) {
+    throw new Error('Set the local repo path in Settings first.');
+  }
+  if (localRunAbortControllers.has(contextId)) {
+    throw new Error('A local run is already in progress.');
+  }
+
+  const controller = new AbortController();
+  localRunAbortControllers.set(contextId, controller);
+  cancelledContexts.delete(contextId);
+  const holdKey = `runlocal:${contextId}`;
+  await acquireKeepAlive(holdKey);
+
+  let runActive = true;
+  let statusChain: Promise<unknown> = Promise.resolve();
+  let lastLogAt = 0;
+  const pushStatus = (statusText: string): void => {
+    statusChain = statusChain.then(() =>
+      runActive ? checkpoint({ ...job, stage: 'validating', statusText, updatedAt: Date.now() }, contextId).catch(() => undefined) : undefined
+    );
+  };
+  pushStatus('Running the repo\'s existing tests…');
+
+  try {
+    const result = await runRepoTests(getPlatform().native, {
+      hostName: state.settings.localRunnerHostName,
+      repoPath,
+      testCmd: state.settings.localTestCommand,
+      port: state.settings.localRunPort ?? 8080,
+      timeoutMs: state.settings.localRunBootTimeoutMs,
+      onStatus: (_phase, message) => pushStatus(`Repo tests: ${message ?? 'running'}`),
+      onLog: (line) => {
+        const now = Date.now();
+        if (now - lastLogAt > 1500) {
+          lastLogAt = now;
+          pushStatus(`tests: ${line.slice(0, 100)}`);
+        }
+      }
+    });
+
+    runActive = false;
+    await statusChain;
+    if (controller.signal.aborted || isContextCancelled(contextId)) {
+      return await loadState(contextId);
+    }
+
+    const updatedJob: JobState = {
+      ...job,
+      stage: job.stage === 'complete' ? 'complete' : 'idle',
+      statusText: result.passed
+        ? `Repo tests passed (${result.command ?? 'test suite'})`
+        : `Repo tests failed — exit ${result.exitCode} (${result.command ?? 'test suite'})`,
+      localTestRun: { kind: 'repo', ...result, ranAt: Date.now() },
+      updatedAt: Date.now()
+    };
+    return await checkpoint(updatedJob, contextId);
+  } catch (error) {
+    if (controller.signal.aborted || isContextCancelled(contextId)) {
+      return await loadState(contextId);
+    }
+    throw error;
+  } finally {
+    runActive = false;
+    await releaseKeepAlive(holdKey);
+    localRunAbortControllers.delete(contextId);
+  }
 };
 
 const handleCancel = async (contextId: string): Promise<AppState> => {
@@ -752,6 +985,7 @@ const handleCancel = async (contextId: string): Promise<AppState> => {
   cancelledContexts.add(contextId);
   generationAbortControllers.get(contextId)?.abort();
   scanAbortControllers.get(contextId)?.abort();
+  localRunAbortControllers.get(contextId)?.abort();
   await finishGenerationExecution(contextId);
   await finishScanExecution(contextId);
   return await completeWithCancel(state.activeJob, state.settings.framework, contextId);
@@ -774,6 +1008,41 @@ const handleDownload = async (artifactId: string, contextId: string): Promise<Ev
     payload: artifact,
     contextId
   };
+};
+
+const handleCheckLocalRunner = async (contextId: string): Promise<EventMessage> => {
+  const state = await loadState(contextId);
+  const host = await pingHost(getPlatform().native, { hostName: state.settings.localRunnerHostName });
+
+  const port = state.settings.localRunPort ?? 8080;
+  let serviceOk = false;
+  let serviceMessage = `Nothing is listening on http://localhost:${port} yet — runLocal will start it.`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`http://localhost:${port}/`, { signal: controller.signal });
+    clearTimeout(timer);
+    serviceOk = true;
+    serviceMessage = `A service is already responding on :${port} (HTTP ${res.status}).`;
+  } catch {
+    // Connection refused / timeout → nothing there yet, which is normal pre-run.
+  }
+
+  return {
+    type: 'LOCAL_RUNNER_STATUS',
+    payload: { hostOk: host.ok, hostMessage: host.message, serviceOk, serviceMessage },
+    contextId
+  } as EventMessage;
+};
+
+const handleDownloadRunner = async (contextId: string): Promise<EventMessage> => {
+  const zipBase64 = await buildRunnerZipBase64();
+  await chrome.downloads.download({
+    filename: runnerZipFileName(),
+    saveAs: true,
+    url: `data:application/zip;base64,${zipBase64}`
+  });
+  return { type: 'ACK', contextId } as EventMessage;
 };
 
 const handleExportPostman = async (contextId: string): Promise<EventMessage> => {
@@ -970,6 +1239,28 @@ const handleMessage = (message: CommandMessage, _sender: unknown, sendResponse: 
 
       if (message.type === 'EXPORT_POSTMAN') {
         sendResponse(await handleExportPostman(contextId));
+        return;
+      }
+
+      if (message.type === 'RUN_LOCALLY') {
+        const next = await handleRunLocally(contextId);
+        sendResponse({ type: 'JOB_COMPLETE', payload: next, contextId } as EventMessage);
+        return;
+      }
+
+      if (message.type === 'RUN_REPO_TESTS') {
+        const next = await handleRunRepoTests(contextId);
+        sendResponse({ type: 'JOB_COMPLETE', payload: next, contextId } as EventMessage);
+        return;
+      }
+
+      if (message.type === 'DOWNLOAD_RUNNER') {
+        sendResponse(await handleDownloadRunner(contextId));
+        return;
+      }
+
+      if (message.type === 'CHECK_LOCAL_RUNNER') {
+        sendResponse(await handleCheckLocalRunner(contextId));
         return;
       }
 

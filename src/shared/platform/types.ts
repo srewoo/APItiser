@@ -71,6 +71,24 @@ export interface SidePanelAdapter {
   open(options: { tabId: number }): Promise<void>;
 }
 
+/**
+ * A connected native-messaging port. Mirrors the subset of chrome.runtime.Port we use.
+ * Wraps chrome.runtime.connectNative so the local-runner logic can be unit-tested with an
+ * in-memory double instead of a real native host.
+ */
+export interface NativePort {
+  postMessage(message: unknown): void;
+  onMessage(listener: (message: unknown) => void): void;
+  onDisconnect(listener: (error?: { message: string }) => void): void;
+  disconnect(): void;
+}
+
+export interface NativeMessagingAdapter {
+  /** True when chrome.runtime.connectNative is available (extension context with permission). */
+  isAvailable(): boolean;
+  connect(hostName: string): NativePort;
+}
+
 export interface Platform {
   storage: StorageAdapter;
   runtime: RuntimeMessagingAdapter;
@@ -81,4 +99,5 @@ export interface Platform {
   tabs: TabsAdapter;
   action: ActionAdapter;
   sidePanel: SidePanelAdapter;
+  native: NativeMessagingAdapter;
 }

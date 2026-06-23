@@ -2,8 +2,10 @@ import { fetchWithTimeout } from '@background/llm/fetchWithTimeout';
 import { statusSatisfied, statusExpectationLabel } from './statusExpectation';
 import type {
   ApiEndpoint,
+  BodyAssertion,
   ExtensionSettings,
   GeneratedTestCase,
+  RequestIdentity,
   SchemaField,
   SchemaObject,
   ValidationFailure,
@@ -65,38 +67,76 @@ const resolveDeep = (value: unknown, runtimeState: RuntimeExecutionState): unkno
   return value;
 };
 
+const AUTH_HEADER_RE = /^(authorization|cookie|x-api-key|x-csrf-token|csrf-token)$/i;
+
+/**
+ * The credential set to use for a given identity. `secondary` substitutes the foreign-user
+ * tokens (for IDOR tests); `none` clears all credentials so an unauthenticated request is
+ * issued and the auth-injection blocks below are skipped.
+ */
+const effectiveStateForIdentity = (
+  runtimeState: RuntimeExecutionState,
+  settings: ExtensionSettings,
+  identity: RequestIdentity
+): RuntimeExecutionState => {
+  if (identity === 'none') {
+    return { ...runtimeState, apiToken: '', apiKey: '', sessionCookie: '', csrfToken: '' };
+  }
+  if (identity === 'secondary') {
+    return {
+      ...runtimeState,
+      apiToken: settings.runtimeSecondaryApiToken || '',
+      apiKey: settings.runtimeSecondaryApiKey || '',
+      sessionCookie: settings.runtimeSecondarySessionCookie || ''
+    };
+  }
+  return runtimeState;
+};
+
 const buildHeaders = (
   headers: Record<string, string> | undefined,
   settings: ExtensionSettings,
-  runtimeState: RuntimeExecutionState
+  runtimeState: RuntimeExecutionState,
+  identity: RequestIdentity = 'primary'
 ): Record<string, string> => {
+  const state = effectiveStateForIdentity(runtimeState, settings, identity);
+
   const resolved = Object.entries(headers ?? {}).reduce<Record<string, string>>((acc, [key, value]) => {
-    acc[key] = resolveTemplateValue(value, runtimeState);
+    // For an explicit no-auth request, drop any auth-bearing custom headers entirely.
+    if (identity === 'none' && AUTH_HEADER_RE.test(key)) {
+      return acc;
+    }
+    acc[key] = resolveTemplateValue(value, state);
     return acc;
   }, {});
 
+  // No credentials are injected for a deliberately unauthenticated request.
+  if (identity === 'none') {
+    return resolved;
+  }
+
   if (settings.runtimeAuthMode === 'bearer' || settings.runtimeAuthMode === 'oauth2') {
-    if (runtimeState.apiToken && !resolved.Authorization) {
-      resolved.Authorization = `Bearer ${runtimeState.apiToken}`;
+    if (state.apiToken && !resolved.Authorization) {
+      resolved.Authorization = `Bearer ${state.apiToken}`;
     }
   }
 
   if (settings.runtimeAuthMode === 'apiKey') {
     const headerName = settings.apiKeyHeaderName || 'X-API-Key';
-    if (runtimeState.apiKey && !resolved[headerName]) {
-      resolved[headerName] = runtimeState.apiKey;
+    if (state.apiKey && !resolved[headerName]) {
+      resolved[headerName] = state.apiKey;
     }
   }
 
   if (settings.runtimeAuthMode === 'cookieSession') {
     const cookieName = settings.sessionCookieName || 'session';
-    if (runtimeState.sessionCookie && !resolved.Cookie) {
-      resolved.Cookie = `${cookieName}=${runtimeState.sessionCookie}`;
+    if (state.sessionCookie && !resolved.Cookie) {
+      resolved.Cookie = `${cookieName}=${state.sessionCookie}`;
     }
   }
 
-  if (settings.csrfHeaderName && runtimeState.csrfToken && !resolved[settings.csrfHeaderName]) {
-    resolved[settings.csrfHeaderName] = runtimeState.csrfToken;
+  if (settings.csrfHeaderName && state.csrfToken && !resolved[settings.csrfHeaderName]) {
+    resolved[settings.csrfHeaderName] = state.csrfToken;
   }
 
   return resolved;
@@ -114,6 +154,47 @@ const buildUrl = (
     }
   }
   return url.toString();
+};
+
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(new Error('aborted'));
+      },
+      { once: true }
+    );
+  });
+
+/**
+ * Issue a request, retrying transient 429/5xx responses with exponential backoff (honoring
+ * a `Retry-After` header when present). Disabled unless `settings.retryOnRateLimit` is set,
+ * so a burst of generated requests no longer counts transient throttling as a real failure.
+ */
+const fetchWithRetry = async (
+  url: string,
+  init: Parameters<typeof fetchWithTimeout>[1],
+  opts: Parameters<typeof fetchWithTimeout>[2],
+  settings: ExtensionSettings,
+  signal?: AbortSignal
+): Promise<Response> => {
+  const maxRetries = settings.retryOnRateLimit ? Math.max(0, settings.maxRetries ?? 2) : 0;
+  let attempt = 0;
+  for (;;) {
+    const response = await fetchWithTimeout(url, init, opts);
+    if (!RETRYABLE_STATUS.has(response.status) || attempt >= maxRetries) {
+      return response;
+    }
+    const retryAfter = Number(response.headers.get('retry-after'));
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 250 * 2 ** attempt;
+    await sleep(waitMs, signal);
+    attempt += 1;
+  }
 };
 
 const typeMatches = (type: string, value: unknown): boolean => {
@@ -135,6 +216,40 @@ const typeMatches = (type: string, value: unknown): boolean => {
   }
 };
 
+const checkConstraints = (schema: SchemaObject | SchemaField, value: unknown, path: string): string[] => {
+  const issues: string[] = [];
+  if (Array.isArray(schema.enum) && schema.enum.length && !schema.enum.some((allowed) => allowed === value)) {
+    issues.push(`${path} value ${JSON.stringify(value)} is not one of ${JSON.stringify(schema.enum)}`);
+  }
+  if (typeof value === 'number') {
+    if (typeof schema.minimum === 'number' && value < schema.minimum) {
+      issues.push(`${path} ${value} is below minimum ${schema.minimum}`);
+    }
+    if (typeof schema.maximum === 'number' && value > schema.maximum) {
+      issues.push(`${path} ${value} is above maximum ${schema.maximum}`);
+    }
+  }
+  const lengthOf = typeof value === 'string' ? value.length : Array.isArray(value) ? value.length : undefined;
+  if (lengthOf !== undefined) {
+    if (typeof schema.minLength === 'number' && lengthOf < schema.minLength) {
+      issues.push(`${path} length ${lengthOf} is below minLength ${schema.minLength}`);
+    }
+    if (typeof schema.maxLength === 'number' && lengthOf > schema.maxLength) {
+      issues.push(`${path} length ${lengthOf} is above maxLength ${schema.maxLength}`);
+    }
+  }
+  if (typeof value === 'string' && schema.pattern) {
+    try {
+      if (!new RegExp(schema.pattern).test(value)) {
+        issues.push(`${path} does not match pattern ${schema.pattern}`);
+      }
+    } catch {
+      // Invalid pattern in schema — ignore rather than fail the test on our own regex error.
+    }
+  }
+  return issues;
+};
+
 const validateSchemaValue = (schema: SchemaObject | SchemaField | undefined, value: unknown, path: string): string[] => {
   if (!schema) {
     return [];
@@ -145,9 +260,11 @@ const validateSchemaValue = (schema: SchemaObject | SchemaField | undefined, val
     return [`${path} expected ${expectedType} but received ${Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value}`];
   }
 
+  const constraintIssues = checkConstraints(schema, value, path);
+
   if ('properties' in schema && schema.properties && value && typeof value === 'object' && !Array.isArray(value)) {
     const objectValue = value as Record<string, unknown>;
-    const issues: string[] = [];
+    const issues: string[] = [...constraintIssues];
     for (const requiredKey of schema.required ?? []) {
       if (!(requiredKey in objectValue)) {
         issues.push(`${path}.${requiredKey} is required`);
@@ -162,10 +279,13 @@ const validateSchemaValue = (schema: SchemaObject | SchemaField | undefined, val
   }
 
   if ('items' in schema && schema.items && Array.isArray(value)) {
-    return value.slice(0, 3).flatMap((item, index) => validateSchemaValue(schema.items, item, `${path}[${index}]`));
+    return [
+      ...constraintIssues,
+      ...value.slice(0, 3).flatMap((item, index) => validateSchemaValue(schema.items, item, `${path}[${index}]`))
+    ];
   }
 
-  return [];
+  return constraintIssues;
 };
 
 const safeJsonParse = (text: string): unknown => {
@@ -236,8 +356,86 @@ const hasRequiredRuntimeValue = (
   return null;
 };
 
+const VOLATILE_KEY_RE = /(updated_?at|created_?at|timestamp|^time$|^date$|request_?id|trace_?id|etag|last_?modified)/i;
+
+/** Drop fields that legitimately differ between two reads (timestamps, ids) before comparing. */
+const stripVolatile = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    return value.map(stripVolatile);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !VOLATILE_KEY_RE.test(key))
+        .map(([key, child]) => [key, stripVolatile(child)])
+    );
+  }
+  return value;
+};
+
+const jsonTypeName = (value: unknown): string => {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (Number.isInteger(value)) return 'integer';
+  return typeof value;
+};
+
+/** Evaluate one executable body assertion; returns a failure message or null. */
+const evaluateAssertion = (assertion: BodyAssertion, payload: unknown): string | null => {
+  const actual = assertion.path ? getByPath(payload, assertion.path) : payload;
+  const label = assertion.path || '<root>';
+  const { op, value } = assertion;
+  switch (op) {
+    case 'exists':
+      return actual === undefined || actual === null ? `${label} expected to exist` : null;
+    case 'absent':
+      return actual !== undefined && actual !== null ? `${label} expected to be absent` : null;
+    case 'equals':
+      return JSON.stringify(actual) === JSON.stringify(value) ? null : `${label} expected ${JSON.stringify(value)} but was ${JSON.stringify(actual)}`;
+    case 'type':
+      return jsonTypeName(actual) === String(value) ? null : `${label} expected type ${String(value)} but was ${jsonTypeName(actual)}`;
+    case 'contains':
+      if (typeof actual === 'string') return actual.includes(String(value)) ? null : `${label} did not contain ${String(value)}`;
+      if (Array.isArray(actual)) return actual.some((item) => JSON.stringify(item) === JSON.stringify(value)) ? null : `${label} did not contain ${JSON.stringify(value)}`;
+      return `${label} is not a string/array for contains`;
+    case 'matches':
+      try {
+        return new RegExp(String(value)).test(String(actual)) ? null : `${label} did not match /${String(value)}/`;
+      } catch {
+        return null;
+      }
+    case 'gt':
+      return Number(actual) > Number(value) ? null : `${label} (${String(actual)}) not > ${String(value)}`;
+    case 'gte':
+      return Number(actual) >= Number(value) ? null : `${label} (${String(actual)}) not >= ${String(value)}`;
+    case 'lt':
+      return Number(actual) < Number(value) ? null : `${label} (${String(actual)}) not < ${String(value)}`;
+    case 'lte':
+      return Number(actual) <= Number(value) ? null : `${label} (${String(actual)}) not <= ${String(value)}`;
+    case 'in':
+      return Array.isArray(value) && value.some((allowed) => JSON.stringify(allowed) === JSON.stringify(actual)) ? null : `${label} (${JSON.stringify(actual)}) not in ${JSON.stringify(value)}`;
+    case 'length': {
+      const len = typeof actual === 'string' || Array.isArray(actual) ? actual.length : 0;
+      return len === Number(value) ? null : `${label} length ${len} != ${String(value)}`;
+    }
+    default:
+      return null;
+  }
+};
+
 const validateContracts = (test: GeneratedTestCase, endpoint: ApiEndpoint, payload: unknown): ValidationFailure[] => {
   const failures: ValidationFailure[] = [];
+
+  for (const assertion of test.expected.bodyAssertions ?? []) {
+    if (payload === undefined) {
+      failures.push({ type: 'contract', message: 'Response body could not be parsed for body assertions.' });
+      break;
+    }
+    const failure = evaluateAssertion(assertion, payload);
+    if (failure) {
+      failures.push({ type: 'contract', message: failure, expected: assertion.op, actual: assertion.path });
+    }
+  }
 
   if (test.expected.pagination) {
     // A list endpoint is "paginated-shaped" if it's an array, has a conventional
@@ -475,9 +673,13 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
     );
   }
 
+  // Missing auth is NOT a reason to skip the whole run — that's the point of running the
+  // generated suite against the local service. Validate anyway and record a warning; tests
+  // that genuinely need credentials will simply come back 401/403 (a real, useful result).
+  const warnings = [...setupExecution.warnings];
   const missingPrereq = hasRequiredRuntimeValue(tests, runtimeState, settings);
   if (missingPrereq) {
-    return buildSkippedSummary(tests, missingPrereq, setupExecution.warnings, setupExecution.results);
+    warnings.push(`${missingPrereq} Running anyway — endpoints that require it may return 401/403.`);
   }
 
   const endpointMap = new Map(endpoints.map((endpoint) => [endpoint.id, endpoint]));
@@ -499,28 +701,28 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
       // from the runtime-value registry before issuing the request — this is what makes
       // id-bearing endpoints validate against real, seeded data instead of 404ing on a
       // fabricated id.
+      const identity: RequestIdentity = test.request.identity ?? 'primary';
       const resolvedPath = resolveTemplateValue(test.request.path, runtimeState);
       const resolvedQuery = resolveDeep(test.request.query ?? {}, runtimeState) as Record<string, unknown>;
       const resolvedBody = test.request.body === undefined || test.request.body === null
         ? undefined
         : resolveDeep(test.request.body, runtimeState);
-
-      const response = await fetchWithTimeout(
-        buildUrl(settings.baseUrl, resolvedPath, resolvedQuery),
-        {
-          method: test.request.method,
-          headers: {
-            'Content-Type': 'application/json',
-            ...buildHeaders(test.request.headers, settings, runtimeState)
-          },
-          body: resolvedBody === undefined ? undefined : JSON.stringify(resolvedBody)
+      const requestUrl = buildUrl(settings.baseUrl, resolvedPath, resolvedQuery);
+      const requestInit = {
+        method: test.request.method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildHeaders(test.request.headers, settings, runtimeState, identity)
         },
-        {
-          timeoutMs: Math.max(10_000, Math.min(settings.timeoutMs, 60_000)),
-          hardTimeoutMs: Math.max(20_000, Math.min(settings.timeoutMs * 2, 90_000)),
-          parentSignal: signal
-        }
-      );
+        body: resolvedBody === undefined ? undefined : JSON.stringify(resolvedBody)
+      };
+      const timeoutOpts = {
+        timeoutMs: Math.max(10_000, Math.min(settings.timeoutMs, 60_000)),
+        hardTimeoutMs: Math.max(20_000, Math.min(settings.timeoutMs * 2, 90_000)),
+        parentSignal: signal
+      };
+
+      const response = await fetchWithRetry(requestUrl, requestInit, timeoutOpts, settings, signal);
 
       status = response.status;
       const text = await response.text();
@@ -594,6 +796,37 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
       }
 
       failures.push(...validateContracts(test, endpoint, parsedPayload));
+
+      // Real idempotency oracle: re-issue the request and require the same status and an
+      // equivalent body (ignoring volatile fields). This replaces the old generated
+      // `repeat.status < 500` check, which proved almost nothing.
+      if (test.expected.idempotent && ['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'].includes(test.request.method.toUpperCase())) {
+        try {
+          const repeat = await fetchWithRetry(requestUrl, requestInit, timeoutOpts, settings, signal);
+          const repeatText = await repeat.text();
+          if (repeat.status !== response.status) {
+            failures.push({
+              type: 'idempotency',
+              message: `Idempotent repeat returned ${repeat.status}, first call returned ${response.status}.`,
+              expected: String(response.status),
+              actual: String(repeat.status)
+            });
+          } else {
+            const firstJson = safeJsonParse(text);
+            const repeatJson = safeJsonParse(repeatText);
+            if (firstJson !== undefined && repeatJson !== undefined) {
+              if (JSON.stringify(stripVolatile(firstJson)) !== JSON.stringify(stripVolatile(repeatJson))) {
+                failures.push({
+                  type: 'idempotency',
+                  message: 'Idempotent repeat returned a different response body.'
+                });
+              }
+            }
+          }
+        } catch {
+          // A failed repeat shouldn't mask the primary result; the first call already recorded status.
+        }
+      }
     } catch (error) {
       failures.push({
         type: 'network',
@@ -623,7 +856,7 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
     skipped: Math.max(tests.length - results.length, 0),
     lastValidatedAt: Date.now(),
     results,
-    warnings: setupExecution.warnings,
+    warnings,
     setupSteps: setupExecution.results
   };
 };

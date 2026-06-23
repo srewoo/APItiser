@@ -1,7 +1,8 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
 import { renderStatusAssertionPy } from '../statusExpectation';
-import { pyPathExpr } from './runtimeTokens';
+import { pyPathExpr, identityHeaders } from './runtimeTokens';
+import { PY_RUNTIME_HELPERS, renderBodyAssertionsPy } from './assertions';
 
 const toPyObject = (value: unknown): string => {
   return JSON.stringify(value ?? null, null, 2)
@@ -90,11 +91,7 @@ export class PytestFrameworkAdapter implements TestFrameworkAdapter {
           // Contract checks are free-text expectations (e.g. "auth boundary enforced") that
           // cannot be auto-asserted; render them as documented expectations rather than a
           // tautological `isinstance(check, str)` assertion that verifies nothing.
-          const contractChecks = testCase.expected.contractChecks?.length
-            ? testCase.expected.contractChecks
-                .map((value) => `    # Contract expectation (verify manually): ${String(value).replace(/\s+/g, ' ').trim()}`)
-                .join('\n')
-            : '    # No contract checks provided';
+          const headers = identityHeaders(testCase);
           const contains = testCase.expected.contains?.length
             ? testCase.expected.contains
                 .map((value) => `    assert ${JSON.stringify(value)} in response.text`)
@@ -107,31 +104,33 @@ export class PytestFrameworkAdapter implements TestFrameworkAdapter {
             ? `    for key, value in ${responseHeaders}.items():\n        assert response.headers.get(key) == value`
             : '    # No response-header assertions provided';
           const schemaChecks = testCase.expected.jsonSchema
-            ? `    assert_schema_shape(${jsonSchema}, safe_json(response), 'response')`
+            ? `    assert_schema_shape(${jsonSchema}, body, 'response')`
             : '    # No schema assertions provided';
+          const bodyAssertions = renderBodyAssertionsPy(testCase, 'body', '    ');
           const paginationCheck = testCase.expected.pagination
-            ? `    assert is_paginated_shape(safe_json(response))`
+            ? `    assert is_paginated_shape(body)`
             : '    # Pagination not asserted';
           const idempotencyCheck = testCase.expected.idempotent
-            ? `    repeat = requests.request(\n        method=${JSON.stringify(testCase.request.method)},\n        url=${toPyUrl(testCase.request.path)},\n        headers=${toPyHeaders(testCase.request.headers ?? {})},\n        params=${toPyObject(testCase.request.query ?? {})},\n        json=${toPyObject(testCase.request.body ?? null)}\n    )\n    assert repeat.status_code < 500`
+            ? `    repeat = request_with_retry(\n        method=${JSON.stringify(testCase.request.method)},\n        url=${toPyUrl(testCase.request.path)},\n        headers=${toPyHeaders(headers)},\n        params=${toPyObject(testCase.request.query ?? {})},\n        json=${toPyObject(testCase.request.body ?? null)}\n    )\n    assert_idempotent(response, repeat)`
             : '    # Idempotency not asserted';
 
           return `def ${fnName}():
-    # ${testCase.category} coverage
+    # ${testCase.category} coverage — identity: ${testCase.request.identity ?? 'primary'}
     # Trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
-    response = requests.request(
+    response = request_with_retry(
         method=${JSON.stringify(testCase.request.method)},
         url=${toPyUrl(testCase.request.path)},
-        headers=${toPyHeaders(testCase.request.headers ?? {})},
+        headers=${toPyHeaders(headers)},
         params=${toPyObject(testCase.request.query ?? {})},
         json=${toPyObject(testCase.request.body ?? null)}
     )
+    body = safe_json(response)
 ${renderStatusAssertionPy(testCase, 'response.status_code', '    ')}
 ${contains}
 ${contentType}
 ${headerChecks}
 ${schemaChecks}
-${contractChecks}
+${bodyAssertions}
 ${paginationCheck}
 ${idempotencyCheck}
 `;
@@ -157,38 +156,7 @@ def safe_json(response):
     except Exception:
         return None
 
-def is_paginated_shape(value):
-    return isinstance(value, list) or (isinstance(value, dict) and (any(key in value for key in ('items', 'results', 'data')) or any(isinstance(v, list) for v in value.values())))
-
-def assert_schema_shape(schema, value, path='response'):
-    if not schema:
-        return
-    schema_type = schema.get('type')
-    if schema_type == 'array':
-        assert isinstance(value, list)
-        if schema.get('items') and value:
-            assert_schema_shape(schema['items'], value[0], f'{path}[0]')
-        return
-    if schema_type == 'object':
-        assert isinstance(value, dict)
-        for key in schema.get('required', []):
-            assert key in value
-        for key, child in (schema.get('properties') or {}).items():
-            if key in value:
-                assert_schema_shape(child, value[key], f'{path}.{key}')
-        return
-    if schema_type == 'integer':
-        assert isinstance(value, int) and not isinstance(value, bool)
-        return
-    if schema_type == 'number':
-        assert isinstance(value, (int, float)) and not isinstance(value, bool)
-        return
-    if schema_type == 'boolean':
-        assert isinstance(value, bool)
-        return
-    if schema_type == 'string':
-        assert isinstance(value, str)
-        return
+${PY_RUNTIME_HELPERS}
 
 ${fnBlocks}
 `

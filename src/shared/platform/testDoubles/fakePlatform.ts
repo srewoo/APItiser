@@ -4,6 +4,8 @@ import type {
   DownloadsAdapter,
   LifecycleAdapter,
   MessageListener,
+  NativeMessagingAdapter,
+  NativePort,
   NotificationsAdapter,
   Platform,
   RuntimeMessagingAdapter,
@@ -12,6 +14,17 @@ import type {
   TabInfo,
   TabsAdapter
 } from '../types';
+
+/** A controllable native-messaging port double: drive host→extension traffic from tests. */
+export interface FakeNativePort extends NativePort {
+  /** Messages the extension posted to the host. */
+  posted: unknown[];
+  /** Push a host→extension message to all listeners. */
+  emit(message: unknown): void;
+  /** Simulate the host disconnecting. */
+  fireDisconnect(error?: { message: string }): void;
+  disconnected: boolean;
+}
 
 /**
  * In-memory platform for tests. Exposes `_spy` helpers to assert on calls
@@ -32,6 +45,10 @@ export interface FakePlatform extends Platform {
   _fireInstalled(): void;
   _fireStartup(): void;
   _setTabs(tabs: TabInfo[]): void;
+  /** Ports opened via native.connect(), in order. */
+  _nativePorts: FakeNativePort[];
+  /** When false, native.isAvailable() returns false. */
+  _nativeAvailable: boolean;
 }
 
 export const createFakePlatform = (): FakePlatform => {
@@ -164,6 +181,43 @@ export const createFakePlatform = (): FakePlatform => {
     async open(): Promise<void> { /* no-op */ }
   };
 
+  const nativePorts: FakeNativePort[] = [];
+  const nativeState = { available: true };
+  const native: NativeMessagingAdapter = {
+    isAvailable(): boolean {
+      return nativeState.available;
+    },
+    connect(): NativePort {
+      const messageListeners: Array<(message: unknown) => void> = [];
+      const disconnectListeners: Array<(error?: { message: string }) => void> = [];
+      const port: FakeNativePort = {
+        posted: [],
+        disconnected: false,
+        postMessage(message): void {
+          port.posted.push(message);
+        },
+        onMessage(listener): void {
+          messageListeners.push(listener);
+        },
+        onDisconnect(listener): void {
+          disconnectListeners.push(listener);
+        },
+        disconnect(): void {
+          port.disconnected = true;
+        },
+        emit(message): void {
+          for (const listener of messageListeners) listener(message);
+        },
+        fireDisconnect(error): void {
+          port.disconnected = true;
+          for (const listener of disconnectListeners) listener(error);
+        }
+      };
+      nativePorts.push(port);
+      return port;
+    }
+  };
+
   return {
     storage,
     runtime,
@@ -174,6 +228,7 @@ export const createFakePlatform = (): FakePlatform => {
     tabs: tabsAdapter,
     action,
     sidePanel,
+    native,
     _store: store,
     _downloads: downloadCalls,
     _notifications: notificationCalls,
@@ -201,6 +256,13 @@ export const createFakePlatform = (): FakePlatform => {
     },
     _setTabs(tabs): void {
       availableTabs = tabs.slice();
+    },
+    _nativePorts: nativePorts,
+    get _nativeAvailable(): boolean {
+      return nativeState.available;
+    },
+    set _nativeAvailable(value: boolean) {
+      nativeState.available = value;
     }
   };
 };

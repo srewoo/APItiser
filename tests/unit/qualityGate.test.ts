@@ -144,7 +144,9 @@ describe('assertionStrength', () => {
         status: 200,
         contains: ['id'],
         contentType: 'application/json',
-        contractChecks: ['schema matches', 'pagination preserved'],
+        // Executable body assertions are the assertion signal now (free-text contractChecks
+        // are human notes and no longer contribute to strength).
+        bodyAssertions: [{ path: 'id', op: 'exists' }],
         jsonSchema: { type: 'object' },
         pagination: true,
         idempotent: true

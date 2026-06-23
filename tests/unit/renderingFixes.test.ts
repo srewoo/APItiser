@@ -38,13 +38,13 @@ const chainedTest: GeneratedTestCase = {
 describe('contract checks render as documented comments, not tautologies', () => {
   it('jest renders contract expectations as comments and never asserts typeof === string', () => {
     const content = new JestFrameworkAdapter().render([schemaTest], projectMeta).map((f) => f.content).join('\n');
-    expect(content).toContain('// Contract expectation (verify manually): auth boundary enforced');
+    expect(content).toContain('// Contract note: auth boundary enforced');
     expect(content).not.toContain("expect(typeof contractCheck).toBe('string')");
   });
 
   it('pytest renders contract expectations as comments and never asserts isinstance str', () => {
     const content = new PytestFrameworkAdapter().render([schemaTest], projectMeta).map((f) => f.content).join('\n');
-    expect(content).toContain('# Contract expectation (verify manually): auth boundary enforced');
+    expect(content).toContain('# Contract note: auth boundary enforced');
     expect(content).not.toContain('assert isinstance(contract_check, str)');
   });
 });

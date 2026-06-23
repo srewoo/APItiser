@@ -78,6 +78,17 @@ export function ProgressTimeline({ activeOrLatestJob, visibleQualityIssues, qual
           ))}
         </div>
       ) : null}
+      {activeOrLatestJob?.localTestRun ? (
+        <div className={`quality-box quality-${activeOrLatestJob.localTestRun.passed ? 'passed' : 'failed'}`}>
+          <p className="quality-summary">
+            <strong>{activeOrLatestJob.localTestRun.kind === 'repo' ? 'Repo tests' : 'Generated suite'}:</strong>{' '}
+            {activeOrLatestJob.localTestRun.passed
+              ? 'passed'
+              : `failed (exit ${activeOrLatestJob.localTestRun.exitCode})`}
+            {activeOrLatestJob.localTestRun.command ? ` • ${activeOrLatestJob.localTestRun.command}` : ''}
+          </p>
+        </div>
+      ) : null}
       {activeOrLatestJob?.readiness ? (
         <div className="quality-box quality-pending">
           <p className="quality-summary">

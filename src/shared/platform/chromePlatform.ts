@@ -4,6 +4,7 @@ import type {
   DownloadsAdapter,
   LifecycleAdapter,
   MessageListener,
+  NativeMessagingAdapter,
   NotificationsAdapter,
   Platform,
   RuntimeMessagingAdapter,
@@ -151,6 +152,32 @@ const sidePanel = (): SidePanelAdapter => ({
   }
 });
 
+const native = (): NativeMessagingAdapter => ({
+  isAvailable(): boolean {
+    return typeof chrome !== 'undefined' && typeof chrome.runtime?.connectNative === 'function';
+  },
+  connect(hostName) {
+    const port = chrome.runtime.connectNative(hostName);
+    return {
+      postMessage(message): void {
+        port.postMessage(message);
+      },
+      onMessage(listener): void {
+        port.onMessage.addListener(listener);
+      },
+      onDisconnect(listener): void {
+        port.onDisconnect.addListener(() => {
+          const err = chrome.runtime.lastError;
+          listener(err ? { message: err.message ?? 'Native host disconnected' } : undefined);
+        });
+      },
+      disconnect(): void {
+        port.disconnect();
+      }
+    };
+  }
+});
+
 export const createChromePlatform = (): Platform => ({
   storage: storage(),
   runtime: runtime(),
@@ -160,5 +187,6 @@ export const createChromePlatform = (): Platform => ({
   alarms: alarms(),
   tabs: tabs(),
   action: action(),
-  sidePanel: sidePanel()
+  sidePanel: sidePanel(),
+  native: native()
 });

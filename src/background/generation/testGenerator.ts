@@ -1,7 +1,11 @@
 import { chunkArray } from '@background/utils/chunks';
 import { loadProviderAdapter } from '@background/llm/client';
 import { PROVIDER_MODELS } from '@shared/constants';
+import { parseGeneratedTestCase } from '@shared/schemas';
 import { getFrameworkAdapter } from './frameworks/registry';
+import { synthesizeDeterministicCases } from './syntheticCases';
+import { synthesizeSecurityCases } from './securityCases';
+import { orderTestsByLifecycle } from './resourceLifecycle';
 import {
   assessGeneratedTestQuality,
   mergeSafeRepairs,
@@ -195,6 +199,35 @@ const endpointsWithErrors = (
   return endpoints.filter((endpoint) => failing.has(endpoint.id));
 };
 
+/**
+ * Build deterministic, schema-grounded cases (negative/edge/security) for every endpoint.
+ * These are merged with the model's output to guarantee baseline coverage that does not
+ * depend on the LLM improvising it. Each is validated against the strict schema before use.
+ */
+export const buildDeterministicCases = (
+  endpoints: ApiEndpoint[],
+  settings: ExtensionSettings
+): GeneratedTestCase[] => {
+  const categories = settings.includeCategories;
+  const hasSecondaryIdentity = Boolean(
+    settings.runtimeSecondaryApiToken || settings.runtimeSecondaryApiKey || settings.runtimeSecondarySessionCookie
+  );
+  const out: GeneratedTestCase[] = [];
+  for (const endpoint of endpoints) {
+    const candidates = [
+      ...synthesizeDeterministicCases(endpoint, categories),
+      ...synthesizeSecurityCases(endpoint, categories, { hasSecondaryIdentity })
+    ];
+    for (const candidate of candidates) {
+      const validated = parseGeneratedTestCase(candidate);
+      if (validated) {
+        out.push(validated);
+      }
+    }
+  }
+  return out;
+};
+
 const dedupeTests = (tests: GeneratedTestCase[]): GeneratedTestCase[] => {
   const seen = new Set<string>();
   return tests.filter((test) => {
@@ -375,7 +408,8 @@ export const repairTestsFromValidation = async (options: {
     repairedTests.push(...(repairedBatch?.length ? repairedBatch : currentTests));
   }
 
-  return [...stableTests, ...repairedTests];
+  // Preserve lifecycle ordering after repair reshuffles the suite.
+  return orderTestsByLifecycle([...stableTests, ...repairedTests]);
 };
 
 export const generateTestSuite = async (options: GenerateOptions): Promise<GenerationResult> => {
@@ -509,7 +543,11 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
     }
   }
 
-  const finalTests = dedupeTests(generatedTests);
+  // Merge model output with deterministic schema/security cases, then order the whole suite
+  // by resource lifecycle (create → use → teardown) so it is no longer order-dependent.
+  const modelTests = dedupeTests(generatedTests);
+  const deterministic = buildDeterministicCases(options.endpoints, options.settings);
+  const finalTests = orderTestsByLifecycle(dedupeTests([...modelTests, ...deterministic]));
   const finalAssessment = assessGeneratedTestQuality(options.endpoints, finalTests, options.settings.includeCategories);
   const files = renderGeneratedFiles(options.settings, options.repo, options.endpoints.length, finalTests);
 

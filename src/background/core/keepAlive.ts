@@ -18,8 +18,9 @@ export const registerKeepAliveListener = (): void => {
       return;
     }
     // Minimal storage read/write keeps the service worker alive during long LLM calls.
-    void platform.storage.get('_heartbeat').then(() => {
-      void platform.storage.set('_heartbeat', Date.now());
-    });
+    void platform.storage
+      .get('_heartbeat')
+      .then(() => platform.storage.set('_heartbeat', Date.now()))
+      .catch(() => undefined);
   });
 };

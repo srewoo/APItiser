@@ -16,6 +16,11 @@ export default defineConfig({
     emptyOutDir: true,
     modulePreload: false,
     chunkSizeWarningLimit: 1000,
+    // Force CommonJS deps (@babel/*, yaml) to initialize lazily and in dependency order.
+    // Without this, their circular requires can run a module's interop before its exports
+    // object exists → "Object.defineProperty called on non-object", which fails service-worker
+    // registration (the failure point shifts with chunking, so it's intermittent otherwise).
+    commonjsOptions: { strictRequires: true },
     rollupOptions: {
       input: {
         popup: resolve(__dirname, 'popup.html'),

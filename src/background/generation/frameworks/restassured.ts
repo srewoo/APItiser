@@ -1,22 +1,14 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
 import { renderStatusAssertionJava } from '../statusExpectation';
-import { javaPathExpr } from './runtimeTokens';
+import { javaPathExpr, identityHeaders } from './runtimeTokens';
+import { renderBodyAssertionsComment } from './assertions';
 
 const javaString = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 
-const headerValueExpr = (value: string): string => {
-  if (value === 'Bearer {{API_TOKEN}}') {
-    return `"Bearer " + envOr("API_TOKEN", "replace-me")`;
-  }
-  if (value === '{{API_KEY}}') {
-    return `envOr("API_KEY", "replace-me")`;
-  }
-  if (value === '{{CSRF_TOKEN}}') {
-    return `envOr("CSRF_TOKEN", "replace-me")`;
-  }
-  return javaString(value);
-};
+// Any `{{NAME}}` placeholder (auth token, secondary identity, or arbitrary runtime value)
+// becomes an envOr read concatenated with literal segments.
+const headerValueExpr = (value: string): string => javaPathExpr(value, javaString);
 
 const javaClassName = (value: string): string => {
   const cleaned = value.replace(/[^a-zA-Z0-9]/g, ' ').trim();
@@ -54,9 +46,10 @@ export class RestAssuredFrameworkAdapter implements TestFrameworkAdapter {
       const methods = cases
         .map((testCase, index) => {
           const methodName = `test_${index + 1}_${testCase.category}`;
-          const headerLines = Object.entries(testCase.request.headers ?? {})
+          const headerLines = Object.entries(identityHeaders(testCase))
             .map(([k, v]) => `\t\t\t.header(${javaString(k)}, ${headerValueExpr(v)})`)
             .join('\n');
+          const bodyAssertionComments = renderBodyAssertionsComment(testCase, '\t\t//');
           const queryLines = Object.entries(testCase.request.query ?? {})
             .map(([k, v]) => `\t\t\t.queryParam(${javaString(k)}, ${javaString(String(v ?? ''))})`)
             .join('\n');
@@ -80,7 +73,7 @@ export class RestAssuredFrameworkAdapter implements TestFrameworkAdapter {
           return `\t@Test
 \t@DisplayName(${javaString(testCase.title)})
 \tvoid ${methodName}() {
-\t\t// Trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
+\t\t// ${testCase.category} — identity: ${testCase.request.identity ?? 'primary'} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
 \t\tResponse response = given()
 \t\t\t.baseUri(envOr("API_BASE_URL", "http://localhost:3000"))
 \t\t\t.header("Content-Type", "application/json")
@@ -97,6 +90,7 @@ ${renderStatusAssertionJava(testCase, 'response.getStatusCode()', 'response.getB
 ${ctAssert}
 ${headerAsserts}
 ${containsAsserts}
+${bodyAssertionComments}
 \t}`;
         })
         .join('\n\n');

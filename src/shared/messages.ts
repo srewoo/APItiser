@@ -9,7 +9,18 @@ export type CommandMessage =
   | { type: 'CANCEL_JOB'; contextId?: string }
   | { type: 'CLEAR_CONTEXT'; contextId?: string }
   | { type: 'DOWNLOAD_ARTIFACT'; payload: { artifactId: string }; contextId?: string }
-  | { type: 'EXPORT_POSTMAN'; contextId?: string };
+  | { type: 'EXPORT_POSTMAN'; contextId?: string }
+  | { type: 'RUN_LOCALLY'; contextId?: string }
+  | { type: 'RUN_REPO_TESTS'; contextId?: string }
+  | { type: 'DOWNLOAD_RUNNER'; contextId?: string }
+  | { type: 'CHECK_LOCAL_RUNNER'; contextId?: string };
+
+export interface LocalRunnerStatus {
+  hostOk: boolean;
+  hostMessage?: string;
+  serviceOk: boolean;
+  serviceMessage?: string;
+}
 
 export type EventMessage =
   | { type: 'STATE_SNAPSHOT'; payload: AppState; contextId?: string }
@@ -18,6 +29,7 @@ export type EventMessage =
   | { type: 'JOB_ERROR'; payload: AppState; error: string; contextId?: string }
   | { type: 'SETTINGS_SAVED'; payload: AppState; contextId?: string }
   | { type: 'ARTIFACT_DOWNLOADED'; payload: GeneratedArtifact; contextId?: string }
+  | { type: 'LOCAL_RUNNER_STATUS'; payload: LocalRunnerStatus; contextId?: string }
   | { type: 'ACK' };
 
 export type RuntimeMessage = CommandMessage | EventMessage;
@@ -32,6 +44,10 @@ export const isCommandMessage = (message: RuntimeMessage): message is CommandMes
     'CANCEL_JOB',
     'CLEAR_CONTEXT',
     'DOWNLOAD_ARTIFACT',
-    'EXPORT_POSTMAN'
+    'EXPORT_POSTMAN',
+    'RUN_LOCALLY',
+    'RUN_REPO_TESTS',
+    'DOWNLOAD_RUNNER',
+    'CHECK_LOCAL_RUNNER'
   ].includes(message.type);
 };

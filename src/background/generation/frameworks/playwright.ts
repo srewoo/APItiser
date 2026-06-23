@@ -1,16 +1,10 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
 import { renderStatusAssertionJs } from '../statusExpectation';
-import { jsTemplatePath } from './runtimeTokens';
+import { jsTemplatePath, jsHeaderValueExpr, identityHeaders } from './runtimeTokens';
+import { jsRuntimeHelpers, renderBodyAssertionsJs } from './assertions';
 
-const headerValueExpr = (value: string): string =>
-  value === 'Bearer {{API_TOKEN}}'
-    ? "(process.env.API_TOKEN ? `Bearer ${process.env.API_TOKEN}` : 'Bearer replace-me')"
-    : value === '{{API_KEY}}'
-      ? "(process.env.API_KEY || 'replace-me')"
-      : value === '{{CSRF_TOKEN}}'
-        ? "(process.env.CSRF_TOKEN || 'replace-me')"
-        : JSON.stringify(value);
+const headerValueExpr = (value: string): string => jsHeaderValueExpr(value);
 
 const toHeadersObject = (headers: Record<string, string>): string => {
   const entries = Object.entries(headers);
@@ -53,8 +47,9 @@ export class PlaywrightFrameworkAdapter implements TestFrameworkAdapter {
         .map((testCase) => {
           const method = testCase.request.method.toLowerCase();
           const requestMethod = PLAYWRIGHT_METHODS[method] ?? 'fetch';
-          const headers = toHeadersObject(testCase.request.headers ?? {});
-          const hasHeaders = Object.keys(testCase.request.headers ?? {}).length > 0;
+          const effectiveHeaders = identityHeaders(testCase);
+          const headers = toHeadersObject(effectiveHeaders);
+          const hasHeaders = Object.keys(effectiveHeaders).length > 0;
           const hasQuery = Object.keys(testCase.request.query ?? {}).length > 0;
           const hasBody = testCase.request.body !== undefined && testCase.request.body !== null;
 
@@ -79,15 +74,28 @@ export class PlaywrightFrameworkAdapter implements TestFrameworkAdapter {
           const headerAsserts = Object.entries(testCase.expected.responseHeaders ?? {})
             .map(([k, v]) => `  expect(response.headers()[${JSON.stringify(k.toLowerCase())}]).toBe(${JSON.stringify(v)});`)
             .join('\n');
+          const schemaChecks = testCase.expected.jsonSchema
+            ? `  assertSchemaShape(${JSON.stringify(testCase.expected.jsonSchema)}, body, 'response');`
+            : '';
+          const paginationCheck = testCase.expected.pagination ? `  expect(isPaginatedShape(body)).toBe(true);` : '';
+          const bodyAssertions = renderBodyAssertionsJs(testCase, 'body', '  ', 'jest');
+          const idempotencyCheck = testCase.expected.idempotent
+            ? `  const repeat = await request.${requestMethod}(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}\`${optionsArg});\n  assertIdempotent({ status: response.status(), json: body }, { status: repeat.status(), json: safeJsonParse(await repeat.text()) });`
+            : '';
 
           return `test(${JSON.stringify(testCase.title)}, async ({ request }) => {
-  // ${testCase.category} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
+  // ${testCase.category} — identity: ${testCase.request.identity ?? 'primary'} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
   const response = await request.${requestMethod}(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}\`${optionsArg});
 ${renderStatusAssertionJs(testCase, 'response.status()', '  ')}
   const text = await response.text();
+  const body = safeJsonParse(text);
 ${ctAssert}
 ${headerAsserts}
 ${containsAsserts}
+${schemaChecks}
+${bodyAssertions}
+${paginationCheck}
+${idempotencyCheck}
 });`;
         })
         .join('\n\n');
@@ -102,6 +110,16 @@ ${containsAsserts}
 import { test, expect } from '@playwright/test';
 
 const BASE_URL = process.env.API_BASE_URL || 'http://localhost:3000';
+
+const safeJsonParse = (text) => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+${jsRuntimeHelpers('jest')}
 
 test.describe(${JSON.stringify(groupKey)}, () => {
 ${blocks}

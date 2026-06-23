@@ -18,7 +18,10 @@ const renderModal = (overrides?: Partial<Parameters<typeof SettingsModal>[0]>) =
     onImportOpenApiFile: vi.fn(),
     onOpenDoc: vi.fn(),
     onExportSettings: vi.fn(),
-    onImportSettings: vi.fn()
+    onImportSettings: vi.fn(),
+    onDownloadRunner: vi.fn(),
+    onCheckLocalRunner: vi.fn(),
+    runnerCheck: { checking: false }
   };
   render(
     <SettingsModal

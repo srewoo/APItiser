@@ -19,17 +19,31 @@ const schemaObjectSchema: z.ZodType<unknown> = z.lazy(() =>
       properties: z.record(z.string(), z.unknown()).optional(),
       items: z.unknown().optional(),
       description: z.string().optional(),
-      example: z.unknown().optional()
+      example: z.unknown().optional(),
+      enum: z.array(z.unknown()).optional(),
+      minimum: z.number().optional(),
+      maximum: z.number().optional(),
+      minLength: z.number().optional(),
+      maxLength: z.number().optional(),
+      pattern: z.string().optional()
     })
     .passthrough()
 );
+
+const bodyAssertionSchema = z.object({
+  path: z.string(),
+  op: z.enum(['equals', 'contains', 'exists', 'absent', 'type', 'matches', 'gt', 'lt', 'gte', 'lte', 'in', 'length']),
+  value: z.unknown().optional(),
+  description: z.string().optional()
+});
 
 const generatedRequestSchema = z.object({
   method: z.string().min(1),
   path: z.string().min(1),
   headers: z.record(z.string(), z.string()).optional(),
   query: z.record(z.string(), z.unknown()).optional(),
-  body: z.unknown().optional()
+  body: z.unknown().optional(),
+  identity: z.enum(['primary', 'secondary', 'none']).optional()
 });
 
 const generatedExpectedSchema = z.object({
@@ -39,6 +53,7 @@ const generatedExpectedSchema = z.object({
   responseHeaders: z.record(z.string(), z.string()).optional(),
   jsonSchema: schemaObjectSchema.optional(),
   contractChecks: z.array(z.string()).optional(),
+  bodyAssertions: z.array(bodyAssertionSchema).optional(),
   pagination: z.boolean().optional(),
   idempotent: z.boolean().optional()
 });
@@ -54,6 +69,9 @@ export const generatedTestCaseSchema = z.object({
   rationale: z.string().optional(),
   trustScore: z.number().optional(),
   trustLabel: trustLabelSchema.optional(),
+  order: z.number().optional(),
+  isSetup: z.boolean().optional(),
+  isTeardown: z.boolean().optional(),
   request: generatedRequestSchema,
   expected: generatedExpectedSchema
 });

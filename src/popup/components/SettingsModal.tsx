@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { PROVIDER_MODELS } from '@shared/constants';
-import type { AppState, RuntimeSetupStep, TestCategory } from '@shared/types';
+import type { AppState, TestCategory } from '@shared/types';
+import type { LocalRunnerStatus } from '@shared/messages';
 
 type KeyProvider = 'openai' | 'claude' | 'gemini';
 
@@ -41,95 +42,10 @@ interface SettingsModalProps {
   onOpenDoc: (path: 'help.html' | 'privacypolicy.html') => void;
   onExportSettings: () => void;
   onImportSettings: (file: File | null | undefined) => void;
+  onDownloadRunner: () => void;
+  onCheckLocalRunner: () => void;
+  runnerCheck: { checking: boolean; result?: LocalRunnerStatus };
 }
-
-interface SetupStepDraft {
-  id: string;
-  name: string;
-  method: string;
-  path: string;
-  expectedStatus: string;
-  headersText: string;
-  queryText: string;
-  bodyText: string;
-  extractJsonApiToken: string;
-  extractJsonApiKey: string;
-  extractJsonCsrfToken: string;
-  extractJsonSessionCookie: string;
-  extractHeaderApiToken: string;
-  extractHeaderApiKey: string;
-  extractHeaderCsrfToken: string;
-  extractHeaderSessionCookie: string;
-  extractCookieName: string;
-}
-
-const stringifyDraftValue = (value: unknown): string => {
-  if (value === undefined) {
-    return '';
-  }
-  return JSON.stringify(value, null, 2);
-};
-
-const parseOptionalJson = (label: string, value: string): unknown => {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    throw new Error(`${label} must be valid JSON.`);
-  }
-};
-
-const createDraftFromStep = (step?: RuntimeSetupStep): SetupStepDraft => ({
-  id: step?.id ?? `step-${Date.now()}`,
-  name: step?.name ?? 'Login',
-  method: step?.method ?? 'POST',
-  path: step?.path ?? '/auth/login',
-  expectedStatus: step?.expectedStatus ? String(step.expectedStatus) : '200',
-  headersText: stringifyDraftValue(step?.headers),
-  queryText: stringifyDraftValue(step?.query),
-  bodyText: stringifyDraftValue(step?.body),
-  extractJsonApiToken: step?.extractJsonPaths?.apiToken ?? '',
-  extractJsonApiKey: step?.extractJsonPaths?.apiKey ?? '',
-  extractJsonCsrfToken: step?.extractJsonPaths?.csrfToken ?? '',
-  extractJsonSessionCookie: step?.extractJsonPaths?.sessionCookie ?? '',
-  extractHeaderApiToken: step?.extractHeaders?.apiToken ?? '',
-  extractHeaderApiKey: step?.extractHeaders?.apiKey ?? '',
-  extractHeaderCsrfToken: step?.extractHeaders?.csrfToken ?? '',
-  extractHeaderSessionCookie: step?.extractHeaders?.sessionCookie ?? '',
-  extractCookieName: step?.extractCookieName ?? ''
-});
-
-const draftToStep = (draft: SetupStepDraft): RuntimeSetupStep => {
-  const extractJsonPaths = {
-    apiToken: draft.extractJsonApiToken.trim(),
-    apiKey: draft.extractJsonApiKey.trim(),
-    csrfToken: draft.extractJsonCsrfToken.trim(),
-    sessionCookie: draft.extractJsonSessionCookie.trim()
-  };
-  const extractHeaders = {
-    apiToken: draft.extractHeaderApiToken.trim(),
-    apiKey: draft.extractHeaderApiKey.trim(),
-    csrfToken: draft.extractHeaderCsrfToken.trim(),
-    sessionCookie: draft.extractHeaderSessionCookie.trim()
-  };
-
-  return {
-    id: draft.id.trim(),
-    name: draft.name.trim(),
-    method: draft.method.trim().toUpperCase(),
-    path: draft.path.trim(),
-    headers: parseOptionalJson('Headers', draft.headersText) as Record<string, string> | undefined,
-    query: parseOptionalJson('Query', draft.queryText) as Record<string, unknown> | undefined,
-    body: parseOptionalJson('Body', draft.bodyText),
-    expectedStatus: draft.expectedStatus.trim() ? Number(draft.expectedStatus.trim()) : undefined,
-    extractJsonPaths: Object.values(extractJsonPaths).some(Boolean) ? extractJsonPaths : undefined,
-    extractHeaders: Object.values(extractHeaders).some(Boolean) ? extractHeaders : undefined,
-    extractCookieName: draft.extractCookieName.trim() || undefined
-  };
-};
 
 export function SettingsModal({
   appState,
@@ -149,11 +65,32 @@ export function SettingsModal({
   onOpenDoc,
   onExportSettings,
   onImportSettings,
+  onDownloadRunner,
+  onCheckLocalRunner,
+  runnerCheck,
 }: SettingsModalProps) {
   const [keyWarning, setKeyWarning] = useState('');
-  const [runtimeSetupDrafts, setRuntimeSetupDrafts] = useState<SetupStepDraft[]>([]);
-  const [runtimeSetupInput, setRuntimeSetupInput] = useState('[]');
-  const [runtimeSetupError, setRuntimeSetupError] = useState('');
+  const [hostCmdCopied, setHostCmdCopied] = useState(false);
+
+  // The host install must allow this exact extension; chrome.runtime.id is the published
+  // Web Store ID in production and the unpacked dev ID otherwise — either way it's correct.
+  const extensionId =
+    typeof chrome !== 'undefined' && chrome.runtime?.id ? chrome.runtime.id : 'YOUR_EXTENSION_ID';
+  const isWindows = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+  // Run from whatever folder contains the installer — the unzipped local-runner download, or
+  // the APItiser repo's native-host/ folder for users who cloned it.
+  const installCommand = isWindows
+    ? `powershell -ExecutionPolicy Bypass -File .\\install.ps1 ${extensionId}`
+    : `./install.sh ${extensionId}`;
+  const copyInstallCommand = (): void => {
+    void navigator.clipboard
+      ?.writeText(installCommand)
+      .then(() => {
+        setHostCmdCopied(true);
+        setTimeout(() => setHostCmdCopied(false), 2000);
+      })
+      .catch(() => undefined);
+  };
 
   const selectedProvider = appState?.settings.provider ?? 'openai';
   const availableModels = PROVIDER_MODELS[selectedProvider];
@@ -174,32 +111,6 @@ export function SettingsModal({
     setApiKeyInput(selectedProviderKey);
     setKeyWarning('');
   }, [selectedProvider, selectedProviderKey]);
-
-  useEffect(() => {
-    const nextDrafts = (appState?.settings.runtimeSetupSteps ?? []).map((step) => createDraftFromStep(step));
-    setRuntimeSetupDrafts(nextDrafts);
-    setRuntimeSetupInput(JSON.stringify(appState?.settings.runtimeSetupSteps ?? [], null, 2));
-    setRuntimeSetupError('');
-  }, [appState?.settings.runtimeSetupSteps]);
-
-  const persistRuntimeSetupDrafts = (nextDrafts: SetupStepDraft[]) => {
-    setRuntimeSetupDrafts(nextDrafts);
-    try {
-      const parsed = nextDrafts.map((draft) => draftToStep(draft));
-      onPatchSettings({ runtimeSetupSteps: parsed });
-      setRuntimeSetupInput(JSON.stringify(parsed, null, 2));
-      setRuntimeSetupError('');
-    } catch (error) {
-      setRuntimeSetupError(error instanceof Error ? error.message : 'Invalid setup step values.');
-    }
-  };
-
-  const updateRuntimeSetupDraft = (index: number, patch: Partial<SetupStepDraft>) => {
-    const nextDrafts = runtimeSetupDrafts.map((draft, draftIndex) => (
-      draftIndex === index ? { ...draft, ...patch } : draft
-    ));
-    persistRuntimeSetupDrafts(nextDrafts);
-  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -389,15 +300,6 @@ export function SettingsModal({
             />
           </label>
           <label>
-            Base URL (for generated tests)
-            <input
-              type="text"
-              value={appState?.settings.baseUrl ?? ''}
-              onChange={(event) => onPatchSettings({ baseUrl: event.target.value.trim() })}
-              placeholder="http://localhost:3000"
-            />
-          </label>
-          <label>
             Test Files Folders (comma-separated)
             <input
               type="text"
@@ -415,74 +317,6 @@ export function SettingsModal({
             />
             Skip endpoints that already have tests
           </label>
-          <label className="inline-toggle">
-            <input
-              type="checkbox"
-              checked={appState?.settings.validateGeneratedTests ?? true}
-              onChange={(event) => onPatchSettings({ validateGeneratedTests: event.target.checked })}
-            />
-            Validate generated tests against Base URL before packaging
-          </label>
-          <label className="inline-toggle">
-            <input
-              type="checkbox"
-              checked={appState?.settings.autoRepairFailingTests ?? true}
-              onChange={(event) => onPatchSettings({ autoRepairFailingTests: event.target.checked })}
-            />
-            Auto-repair tests that fail live validation
-          </label>
-          <label>
-            Validation Repair Rounds
-            <input
-              type="number"
-              min={0}
-              max={5}
-              value={appState?.settings.maxValidationRepairs ?? 2}
-              onChange={(event) => onPatchSettings({ maxValidationRepairs: Number(event.target.value) })}
-            />
-          </label>
-          <div className="grid two">
-            <label>
-              Runtime Auth Mode
-              <select
-                value={appState?.settings.runtimeAuthMode ?? 'none'}
-                onChange={(event) => onPatchSettings({ runtimeAuthMode: event.target.value as AppState['settings']['runtimeAuthMode'] })}
-              >
-                <option value="none">None</option>
-                <option value="bearer">Bearer token</option>
-                <option value="apiKey">API key</option>
-                <option value="cookieSession">Cookie session</option>
-                <option value="oauth2">OAuth2 bearer</option>
-              </select>
-            </label>
-            <label>
-              API Key Header Name
-              <input
-                type="text"
-                value={appState?.settings.apiKeyHeaderName ?? 'X-API-Key'}
-                onChange={(event) => onPatchSettings({ apiKeyHeaderName: event.target.value.trim() })}
-                placeholder="X-API-Key"
-              />
-            </label>
-            <label>
-              Session Cookie Name
-              <input
-                type="text"
-                value={appState?.settings.sessionCookieName ?? ''}
-                onChange={(event) => onPatchSettings({ sessionCookieName: event.target.value.trim() })}
-                placeholder="session"
-              />
-            </label>
-            <label>
-              CSRF Header Name
-              <input
-                type="text"
-                value={appState?.settings.csrfHeaderName ?? 'X-CSRF-Token'}
-                onChange={(event) => onPatchSettings({ csrfHeaderName: event.target.value.trim() })}
-                placeholder="X-CSRF-Token"
-              />
-            </label>
-          </div>
 
           <div className="category-row">
             {(['positive', 'negative', 'edge', 'security'] as const).map((category) => (
@@ -508,294 +342,162 @@ export function SettingsModal({
               placeholder="Always test pagination with limit=0. Use project-specific auth header X-Custom-Auth."
             />
           </label>
-          <div className="grid two">
-            <label>
-              Runtime API Token
-              <input
-                type="password"
-                value={appState?.settings.runtimeApiToken ?? ''}
-                onChange={(event) => onPatchSettings({ runtimeApiToken: event.target.value.trim() })}
-                placeholder="Used only for live validation"
-              />
-            </label>
-            <label>
-              Runtime API Key
-              <input
-                type="password"
-                value={appState?.settings.runtimeApiKey ?? ''}
-                onChange={(event) => onPatchSettings({ runtimeApiKey: event.target.value.trim() })}
-                placeholder="Used only for live validation"
-              />
-            </label>
-            <label>
-              Runtime Session Cookie
-              <input
-                type="password"
-                value={appState?.settings.runtimeSessionCookie ?? ''}
-                onChange={(event) => onPatchSettings({ runtimeSessionCookie: event.target.value.trim() })}
-                placeholder="session=..."
-              />
-            </label>
-            <label>
-              Runtime CSRF Token
-              <input
-                type="password"
-                value={appState?.settings.runtimeCsrfToken ?? ''}
-                onChange={(event) => onPatchSettings({ runtimeCsrfToken: event.target.value.trim() })}
-                placeholder="Used only for live validation"
-              />
-            </label>
-          </div>
           <div className="settings-group">
-            <h3>Validation Setup Flow</h3>
+            <h3>Local Runner</h3>
             <p className="subtle">
-              Build setup steps for login, token exchange, CSRF bootstrap, or prerequisite resource creation before live validation runs.
+              Boot the repo&apos;s service automatically (via runLocal) and validate the generated
+              suite against it — no need to start the service by hand.
             </p>
-            <div className="grid two">
-              <button
-                type="button"
-                className="ghost utility-btn"
-                onClick={() => persistRuntimeSetupDrafts([...runtimeSetupDrafts, createDraftFromStep()])}
-              >
-                Add Login Step
-              </button>
-              <button
-                type="button"
-                className="ghost utility-btn"
-                onClick={() => persistRuntimeSetupDrafts([
-                  ...runtimeSetupDrafts,
-                  createDraftFromStep({
-                    id: `setup-${Date.now()}`,
-                    name: 'Seed Fixture',
-                    method: 'POST',
-                    path: '/test/seed',
-                    expectedStatus: 201
-                  })
-                ])}
-              >
-                Add Fixture Step
-              </button>
-            </div>
-            {runtimeSetupDrafts.length === 0 ? (
-              <p className="subtle">No setup steps configured.</p>
-            ) : null}
-            {runtimeSetupDrafts.map((draft, index) => (
-              <div key={draft.id || `draft-${index}`} className="panel">
-                <div className="grid two">
-                  <label>
-                    Step Name
-                    <input
-                      type="text"
-                      value={draft.name}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { name: event.target.value })}
-                      placeholder="Login"
-                    />
-                  </label>
-                  <label>
-                    Step ID
-                    <input
-                      type="text"
-                      value={draft.id}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { id: event.target.value })}
-                      placeholder="login"
-                    />
-                  </label>
-                  <label>
-                    Method
-                    <select
-                      value={draft.method}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { method: event.target.value })}
-                    >
-                      {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => (
-                        <option key={method} value={method}>{method}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Path
-                    <input
-                      type="text"
-                      value={draft.path}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { path: event.target.value })}
-                      placeholder="/auth/login"
-                    />
-                  </label>
-                  <label>
-                    Expected Status
-                    <input
-                      type="number"
-                      min={100}
-                      max={599}
-                      value={draft.expectedStatus}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { expectedStatus: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    Extract Cookie Name
-                    <input
-                      type="text"
-                      value={draft.extractCookieName}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractCookieName: event.target.value })}
-                      placeholder="session"
-                    />
-                  </label>
-                </div>
-                <div className="grid two">
-                  <label>
-                    Headers JSON
-                    <textarea
-                      className="spec-input"
-                      rows={4}
-                      value={draft.headersText}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { headersText: event.target.value })}
-                      placeholder='{"Content-Type":"application/json"}'
-                    />
-                  </label>
-                  <label>
-                    Query JSON
-                    <textarea
-                      className="spec-input"
-                      rows={4}
-                      value={draft.queryText}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { queryText: event.target.value })}
-                      placeholder='{"workspace":"qa"}'
-                    />
-                  </label>
-                </div>
-                <label>
-                  Body JSON
-                  <textarea
-                    className="spec-input"
-                    rows={4}
-                    value={draft.bodyText}
-                    onChange={(event) => updateRuntimeSetupDraft(index, { bodyText: event.target.value })}
-                    placeholder='{"email":"qa@example.com","password":"secret"}'
-                  />
-                </label>
-                <div className="grid two">
-                  <label>
-                    JSON Path: API Token
-                    <input
-                      type="text"
-                      value={draft.extractJsonApiToken}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonApiToken: event.target.value })}
-                      placeholder="token"
-                    />
-                  </label>
-                  <label>
-                    JSON Path: API Key
-                    <input
-                      type="text"
-                      value={draft.extractJsonApiKey}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonApiKey: event.target.value })}
-                      placeholder="credentials.apiKey"
-                    />
-                  </label>
-                  <label>
-                    JSON Path: CSRF Token
-                    <input
-                      type="text"
-                      value={draft.extractJsonCsrfToken}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonCsrfToken: event.target.value })}
-                      placeholder="csrf.token"
-                    />
-                  </label>
-                  <label>
-                    JSON Path: Session Cookie Value
-                    <input
-                      type="text"
-                      value={draft.extractJsonSessionCookie}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractJsonSessionCookie: event.target.value })}
-                      placeholder="session.value"
-                    />
-                  </label>
-                  <label>
-                    Header: API Token
-                    <input
-                      type="text"
-                      value={draft.extractHeaderApiToken}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderApiToken: event.target.value })}
-                      placeholder="x-api-token"
-                    />
-                  </label>
-                  <label>
-                    Header: API Key
-                    <input
-                      type="text"
-                      value={draft.extractHeaderApiKey}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderApiKey: event.target.value })}
-                      placeholder="x-api-key"
-                    />
-                  </label>
-                  <label>
-                    Header: CSRF Token
-                    <input
-                      type="text"
-                      value={draft.extractHeaderCsrfToken}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderCsrfToken: event.target.value })}
-                      placeholder="x-csrf-token"
-                    />
-                  </label>
-                  <label>
-                    Header: Session Cookie Value
-                    <input
-                      type="text"
-                      value={draft.extractHeaderSessionCookie}
-                      onChange={(event) => updateRuntimeSetupDraft(index, { extractHeaderSessionCookie: event.target.value })}
-                      placeholder="set-cookie"
-                    />
-                  </label>
-                </div>
-                <button
-                  type="button"
-                  className="ghost utility-btn"
-                  onClick={() => persistRuntimeSetupDrafts(runtimeSetupDrafts.filter((_, draftIndex) => draftIndex !== index))}
-                >
-                  Remove Step
-                </button>
+
+            <details className="local-runner-help">
+              <summary>How to run tests locally (one-time setup)</summary>
+              <div className="local-runner-help-body">
+                <p className="subtle">
+                  A browser extension can&apos;t start a service on its own, so APItiser uses a small
+                  local helper (a Chrome <em>native messaging host</em>) that runs <code>runLocal</code>
+                  for you. You install it once per machine — after that, &quot;Run Locally&quot; is one click.
+                </p>
+                <p className="subtle">Without it you can still generate, download, and validate against a server you start yourself.</p>
+                <ol className="local-runner-steps">
+                  <li>
+                    Prerequisites: <strong>Node.js</strong> and <strong>git</strong> on your PATH, and the
+                    repo you want to test cloned locally.
+                    {isWindows ? ' On Windows also install Git for Windows (it provides the bash runLocal needs).' : ''}
+                  </li>
+                  <li>
+                    Download the APItiser local runner (the host + installer + <code>runLocal</code>, served by
+                    this extension) and unzip it. <strong>Unzip it somewhere outside <code>~/Downloads</code></strong>
+                    {' '}(e.g. your home folder) — macOS blocks Chrome from launching files in Downloads/Desktop/Documents.
+                    The installer then copies it to <code>~/.apitiser/runner</code> for you.
+                    <div className="cmd-row">
+                      <button type="button" className="utility-btn link-download" onClick={onDownloadRunner}>
+                        Download local runner
+                      </button>
+                    </div>
+                  </li>
+                  <li>
+                    From the unzipped folder, register the helper (locked to this extension&apos;s ID):
+                    <div className="cmd-row">
+                      <code className="cmd">{installCommand}</code>
+                      <button type="button" className="ghost utility-btn" onClick={copyInstallCommand}>
+                        {hostCmdCopied ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                    <span className="subtle">Extension ID: <code>{extensionId}</code>. (Cloned the repo instead? The runner is its <code>native-host/</code> folder.)</span>
+                  </li>
+                  <li>Set the <strong>local repo path</strong> below, enable &quot;Run Locally&quot;, and save.</li>
+                  <li>Generate tests, then click <strong>Run Locally</strong> on the main screen.</li>
+                </ol>
+                <p className="subtle runner-note">
+                  <strong>Handled for you:</strong> the runner auto-starts <strong>Docker</strong> for
+                  container/compose repos, auto-detects the app&apos;s <strong>port</strong> from
+                  <code> docker-compose.yml</code>, and installs the service, suite, and Python-venv
+                  dependencies at run time. You only need the base tools <em>installed</em>
+                  (Docker / Node / Python as your repo requires) — the runner can&apos;t install those.
+                  Set <strong>Local Run Port</strong> only to override the auto-detected one.
+                </p>
+                <p className="subtle">
+                  Windows uses a registry entry instead of <code>install.sh</code> — see the bundled
+                  <code> INSTALL.md</code> for the exact steps and troubleshooting.
+                </p>
               </div>
-            ))}
+            </details>
+
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={appState?.settings.enableLocalRunner ?? false}
+                onChange={(event) => onPatchSettings({ enableLocalRunner: event.target.checked })}
+              />
+              Enable &quot;Run Locally&quot;
+            </label>
+
+            <button type="button" className="ghost utility-btn" onClick={onCheckLocalRunner} disabled={runnerCheck.checking}>
+              {runnerCheck.checking ? 'Checking…' : 'Check setup'}
+            </button>
+            {runnerCheck.result ? (
+              <div className="runner-check">
+                <p className={runnerCheck.result.hostOk ? 'check-ok' : 'check-bad'}>
+                  {runnerCheck.result.hostOk
+                    ? '✓ Native host reachable — local runs are ready.'
+                    : `✗ Native host not reachable: ${runnerCheck.result.hostMessage ?? 'unknown error'}`}
+                </p>
+                {!runnerCheck.result.hostOk ? (
+                  <p className="subtle">Install/re-install the runner above, then check again.</p>
+                ) : null}
+                <p className="subtle">{runnerCheck.result.serviceMessage}</p>
+              </div>
+            ) : null}
+
             <label>
-              Advanced JSON Editor
-              <textarea
-                className="spec-input"
-                rows={8}
-                value={runtimeSetupInput}
-                onChange={(event) => {
-                  setRuntimeSetupInput(event.target.value);
-                  setRuntimeSetupError('');
-                }}
-                onBlur={() => {
-                  try {
-                    const parsed = JSON.parse(runtimeSetupInput);
-                    if (!Array.isArray(parsed)) {
-                      throw new Error('Setup flow must be a JSON array.');
-                    }
-                    const nextDrafts = parsed.map((step) => createDraftFromStep(step as RuntimeSetupStep));
-                    setRuntimeSetupDrafts(nextDrafts);
-                    onPatchSettings({ runtimeSetupSteps: parsed as RuntimeSetupStep[] });
-                    setRuntimeSetupError('');
-                  } catch (error) {
-                    setRuntimeSetupError(error instanceof Error ? error.message : 'Invalid setup flow JSON.');
-                  }
-                }}
-                placeholder={`[
-  {
-    "id": "login",
-    "name": "Login",
-    "method": "POST",
-    "path": "/auth/login",
-    "body": { "email": "qa@example.com", "password": "secret" },
-    "extractJsonPaths": { "apiToken": "token" },
-    "expectedStatus": 200
-  }
-]`}
+              Local Repo Path
+              <input
+                type="text"
+                value={appState?.settings.localRepoPath ?? ''}
+                onChange={(event) => onPatchSettings({ localRepoPath: event.target.value.trim() })}
+                placeholder="/Users/you/code/my-api"
               />
             </label>
-            {runtimeSetupError ? <small className="key-warning">{runtimeSetupError}</small> : null}
-            <small className="subtle">
-              Runtime setup flows are excluded from settings export.
-            </small>
+            <div className="grid two">
+              <label>
+                Local Run Port
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={appState?.settings.localRunPort ?? 8080}
+                  onChange={(event) => onPatchSettings({ localRunPort: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                Boot Timeout (ms)
+                <input
+                  type="number"
+                  min={10000}
+                  step={10000}
+                  value={appState?.settings.localRunBootTimeoutMs ?? 180000}
+                  onChange={(event) => onPatchSettings({ localRunBootTimeoutMs: Number(event.target.value) })}
+                />
+              </label>
+            </div>
+            <label>
+              runLocal Script Path (optional)
+              <input
+                type="text"
+                value={appState?.settings.runLocalScriptPath ?? ''}
+                onChange={(event) => onPatchSettings({ runLocalScriptPath: event.target.value.trim() })}
+                placeholder="Auto-detected if runLocal/ sits next to APItiser"
+              />
+            </label>
+            <div className="grid two">
+              <label>
+                Run Command Override (optional)
+                <input
+                  type="text"
+                  value={appState?.settings.localRunCmd ?? ''}
+                  onChange={(event) => onPatchSettings({ localRunCmd: event.target.value })}
+                  placeholder="e.g. npm run start:dev"
+                />
+              </label>
+              <label>
+                Stack Override (optional)
+                <input
+                  type="text"
+                  value={appState?.settings.localRunStack ?? ''}
+                  onChange={(event) => onPatchSettings({ localRunStack: event.target.value.trim() })}
+                  placeholder="node | python | go | …"
+                />
+              </label>
+            </div>
+            <label>
+              Test Command Override (optional)
+              <input
+                type="text"
+                value={appState?.settings.localTestCommand ?? ''}
+                onChange={(event) => onPatchSettings({ localTestCommand: event.target.value })}
+                placeholder="Used by 'Run Repo Tests'. Auto-detected (pytest / npm test / go test / …) if blank."
+              />
+            </label>
           </div>
         </div>
 

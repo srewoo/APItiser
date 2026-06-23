@@ -4,6 +4,7 @@ import { isPlausibleRawTest, parseGeneratedTestCase } from '@shared/schemas';
 import type {
   ApiEndpoint,
   BatchQualityAssessment,
+  BodyAssertion,
   GeneratedTestCase,
   QualityIssue
 } from '@shared/types';
@@ -65,6 +66,75 @@ const defaultContractChecks = (endpoint: ApiEndpoint, category: GeneratedTestCas
   }
   return checks;
 };
+
+/**
+ * Deterministic, EXECUTABLE assertions derived from the documented response contract.
+ * Used as the default when the model supplies none — so a generated test asserts real
+ * response invariants (required fields exist, list endpoints return arrays) instead of a
+ * bare status code. Only emitted for success-oriented tests.
+ */
+const defaultBodyAssertions = (
+  endpoint: ApiEndpoint,
+  category: GeneratedTestCase['category'],
+  status: number
+): BodyAssertion[] => {
+  if (category !== 'positive' && category !== 'edge') {
+    return [];
+  }
+  if (status >= 400) {
+    return [];
+  }
+  const response = defaultResponseForStatus(endpoint, status);
+  const schema = response?.schema;
+  if (!schema) {
+    return [];
+  }
+  if (schema.type === 'array') {
+    return [{ path: '', op: 'type', value: 'array', description: 'response is a list' }];
+  }
+  if (schema.type === 'object') {
+    return (schema.required ?? [])
+      .slice(0, 5)
+      .map((field) => ({ path: field, op: 'exists' as const, description: `documented field "${field}" present` }));
+  }
+  return [];
+};
+
+const VALID_ASSERTION_OPS: ReadonlySet<BodyAssertion['op']> = new Set([
+  'equals', 'contains', 'exists', 'absent', 'type', 'matches', 'gt', 'lt', 'gte', 'lte', 'in', 'length'
+]);
+
+/** Sanitize a raw `bodyAssertions` array from the model; returns null when none are valid. */
+const normalizeBodyAssertions = (value: unknown): BodyAssertion[] | null => {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const out: BodyAssertion[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const op = String(item.op ?? '') as BodyAssertion['op'];
+    if (!VALID_ASSERTION_OPS.has(op)) {
+      continue;
+    }
+    out.push({
+      path: typeof item.path === 'string' ? item.path : '',
+      op,
+      value: item.value,
+      description: typeof item.description === 'string' ? item.description : undefined
+    });
+  }
+  return out.length ? out : null;
+};
+
+/** Does a test carry at least one executable assertion beyond its status code? */
+const hasExecutableAssertion = (test: GeneratedTestCase): boolean =>
+  (test.expected.bodyAssertions?.length ?? 0) > 0
+  || Boolean(test.expected.jsonSchema)
+  || (test.expected.contains?.length ?? 0) > 0
+  || Boolean(test.expected.contentType)
+  || Object.keys(test.expected.responseHeaders ?? {}).length > 0;
 
 const isLikelyPaginatedEndpoint = (endpoint: ApiEndpoint): boolean =>
   endpoint.queryParams.some((param) => /page|limit|offset|cursor/i.test(param.name))
@@ -142,7 +212,9 @@ const statusAllowedForEndpoint = (endpoint: ApiEndpoint, test: GeneratedTestCase
     return status >= 400 || documented.includes(status);
   }
   if (test.category === 'edge') {
-    return documented.includes(status) || status === defaultExpectedStatus(endpoint) || [400, 404, 409, 413, 422, 429].includes(status);
+    // Any 4xx is acceptable for an edge case (matches the runtime statusExpectation class
+    // check) — not just a fixed subset, which previously flagged documented 401/403/451 edges.
+    return documented.includes(status) || status === defaultExpectedStatus(endpoint) || (status >= 400 && status <= 499);
   }
   if (documented.length === 0) {
     return status === defaultExpectedStatus(endpoint);
@@ -184,12 +256,17 @@ const securityTestLooksWeak = (endpoint: ApiEndpoint, test: GeneratedTestCase): 
 
 const repairTestKey = (test: GeneratedTestCase): string => `${test.endpointId}::${test.category}`;
 
+/**
+ * Strength of a test's EXECUTABLE assertions. Free-text contractChecks are deliberately
+ * excluded — they are human notes, not assertions, and counting them was what made the
+ * old quality signal hollow. Body assertions and schema checks dominate the score.
+ */
 export const assertionStrength = (test: GeneratedTestCase): number =>
-  (test.expected.contains?.length ?? 0)
-  + (test.expected.contentType ? 2 : 0)
+  (test.expected.bodyAssertions?.length ?? 0) * 2
+  + (test.expected.contains?.length ?? 0)
+  + (test.expected.contentType ? 1 : 0)
   + Object.keys(test.expected.responseHeaders ?? {}).length
   + (test.expected.jsonSchema ? 3 : 0)
-  + (test.expected.contractChecks?.length ?? 0)
   + (test.expected.pagination ? 1 : 0)
   + (test.expected.idempotent ? 1 : 0);
 
@@ -338,8 +415,11 @@ export const assessGeneratedTestQuality = (
       if (test.category === 'positive' && documentedResponse?.schema && !test.expected.jsonSchema) {
         issues.push(createIssue('schema-assertion', 'error', `Missing schema assertion for ${endpoint.method} ${endpoint.path}`, endpoint.id, test.category));
       }
-      if (!test.expected.contractChecks?.length) {
-        issues.push(createIssue('contract-assertion', 'warn', `Missing contract assertions for ${endpoint.method} ${endpoint.path}`, endpoint.id, test.category));
+      // Honest assertion-substance check: a success-oriented test that asserts nothing but a
+      // status code is weak. This is measured on EXECUTABLE assertions (body assertions,
+      // schema, contains, headers) — not free-text contract notes, which assert nothing.
+      if ((test.category === 'positive' || test.category === 'edge') && test.expected.status < 400 && !hasExecutableAssertion(test)) {
+        issues.push(createIssue('weak-assertions', 'warn', `Status-only test with no response assertions for ${endpoint.method} ${endpoint.path}`, endpoint.id, test.category));
       }
     }
   }
@@ -453,38 +533,61 @@ export const normalizeGeneratedTests = (
 
     const status = Number.isFinite(Number(expected.status)) ? Number(expected.status) : defaultExpectedStatus(endpoint);
     const documentedResponse = defaultResponseForStatus(endpoint, status);
-    const trustScore = Math.max(1, Math.min(99, Math.round((endpoint.trustScore ?? Math.round((endpoint.confidence ?? 0.5) * 100)) - (String(source.title ?? '').toLowerCase().includes('generated') ? 12 : 0))));
+    const resolvedCategory: GeneratedTestCase['category'] = allowedCategories.includes(category)
+      ? (category as GeneratedTestCase['category'])
+      : 'positive';
+    const identity = ['primary', 'secondary', 'none'].includes(String(request.identity))
+      ? (request.identity as GeneratedTestCase['request']['identity'])
+      : undefined;
+
+    const normalizedExpected: GeneratedTestCase['expected'] = {
+      status,
+      contains: Array.isArray(expected.contains)
+        ? (expected.contains as string[]).map((value) => String(value)).filter(Boolean)
+        : [],
+      contentType: typeof expected.contentType === 'string' ? expected.contentType : documentedResponse?.contentType,
+      responseHeaders: normalizeHeaders(expected.responseHeaders),
+      jsonSchema: isRecord(expected.jsonSchema)
+        ? (expected.jsonSchema as unknown as GeneratedTestCase['expected']['jsonSchema'])
+        : (resolvedCategory === 'positive' ? documentedResponse?.schema : undefined),
+      // Free-text human notes only (no longer the quality signal).
+      contractChecks: Array.isArray(expected.contractChecks)
+        ? expected.contractChecks.map((value) => String(value))
+        : defaultContractChecks(endpoint, resolvedCategory),
+      // Executable assertions: model-provided when valid, else synthesized from the contract.
+      bodyAssertions: normalizeBodyAssertions(expected.bodyAssertions)
+        ?? defaultBodyAssertions(endpoint, resolvedCategory, status),
+      pagination: typeof expected.pagination === 'boolean' ? expected.pagination : isLikelyPaginatedEndpoint(endpoint),
+      idempotent: typeof expected.idempotent === 'boolean' ? expected.idempotent : ['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'].includes(endpoint.method)
+    };
+
+    // Trust blends endpoint extraction confidence with the strength of the test's actual
+    // executable assertions (a status-only test is low-trust even on a well-extracted
+    // endpoint), minus a penalty for a boilerplate "generated" title.
+    const evidenceComponent = endpoint.trustScore ?? Math.round((endpoint.confidence ?? 0.5) * 100);
+    const assertionComponent = Math.min(100, assertionStrength({ expected: normalizedExpected } as GeneratedTestCase) * 12);
+    const genericPenalty = String(source.title ?? '').toLowerCase().includes('generated') ? 12 : 0;
+    const trustScore = Math.max(1, Math.min(99, Math.round(0.5 * evidenceComponent + 0.5 * assertionComponent) - genericPenalty));
 
     const normalized: GeneratedTestCase = {
       endpointId: endpoint.id,
-      category: allowedCategories.includes(category) ? (category as GeneratedTestCase['category']) : 'positive',
+      category: resolvedCategory,
       title: String(source.title ?? `${endpoint.method} ${endpoint.path} generated test`),
       rationale: typeof source.rationale === 'string' ? source.rationale : endpoint.summary ?? endpoint.description,
       trustScore,
       trustLabel: inferredTrustLabel(trustScore),
+      ...(typeof source.order === 'number' ? { order: source.order } : {}),
+      ...(source.isSetup === true ? { isSetup: true } : {}),
+      ...(source.isTeardown === true ? { isTeardown: true } : {}),
       request: {
         method: endpoint.method,
         path: normalizeRequestPath(request.path, endpoint),
         headers,
         query: normalizeQuery(request.query),
-        body: request.body
+        body: request.body,
+        ...(identity ? { identity } : {})
       },
-      expected: {
-        status,
-        contains: Array.isArray(expected.contains)
-          ? (expected.contains as string[]).map((value) => String(value)).filter(Boolean)
-          : [],
-        contentType: typeof expected.contentType === 'string' ? expected.contentType : documentedResponse?.contentType,
-        responseHeaders: normalizeHeaders(expected.responseHeaders),
-        jsonSchema: isRecord(expected.jsonSchema)
-          ? (expected.jsonSchema as unknown as GeneratedTestCase['expected']['jsonSchema'])
-          : (category === 'positive' ? documentedResponse?.schema : undefined),
-        contractChecks: Array.isArray(expected.contractChecks)
-          ? expected.contractChecks.map((value) => String(value))
-          : defaultContractChecks(endpoint, allowedCategories.includes(category) ? (category as GeneratedTestCase['category']) : 'positive'),
-        pagination: typeof expected.pagination === 'boolean' ? expected.pagination : isLikelyPaginatedEndpoint(endpoint),
-        idempotent: typeof expected.idempotent === 'boolean' ? expected.idempotent : ['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'].includes(endpoint.method)
-      }
+      expected: normalizedExpected
     };
 
     const key = [

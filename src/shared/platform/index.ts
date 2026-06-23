@@ -7,6 +7,8 @@ export type {
   DownloadsAdapter,
   LifecycleAdapter,
   MessageListener,
+  NativeMessagingAdapter,
+  NativePort,
   NotificationsAdapter,
   Platform,
   RuntimeMessagingAdapter,

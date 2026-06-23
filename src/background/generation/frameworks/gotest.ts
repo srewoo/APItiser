@@ -1,24 +1,16 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
 import { renderStatusAssertionGo } from '../statusExpectation';
-import { goPathExpr } from './runtimeTokens';
+import { goPathExpr, identityHeaders } from './runtimeTokens';
+import { renderBodyAssertionsComment } from './assertions';
 
 const escapeBackticks = (value: string): string => value.replace(/`/g, '` + "`" + `');
 
 const toGoString = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
-const headerValueExpr = (value: string): string => {
-  if (value === 'Bearer {{API_TOKEN}}') {
-    return `"Bearer " + getEnv("API_TOKEN", "replace-me")`;
-  }
-  if (value === '{{API_KEY}}') {
-    return `getEnv("API_KEY", "replace-me")`;
-  }
-  if (value === '{{CSRF_TOKEN}}') {
-    return `getEnv("CSRF_TOKEN", "replace-me")`;
-  }
-  return toGoString(value);
-};
+// Any `{{NAME}}` placeholder (auth token or arbitrary runtime value, incl. the secondary
+// identity token) becomes a getEnv read, concatenated with literal segments.
+const headerValueExpr = (value: string): string => goPathExpr(value, toGoString);
 
 const renderHeaders = (headers: Record<string, string>): string => {
   const entries = Object.entries(headers);
@@ -73,8 +65,9 @@ export class GoTestFrameworkAdapter implements TestFrameworkAdapter {
             testCase.request.body !== undefined && testCase.request.body !== null
               ? `bodyBytes := []byte(\`${escapeBackticks(JSON.stringify(testCase.request.body))}\`)\n\tbodyReader := bytes.NewReader(bodyBytes)`
               : `var bodyReader io.Reader = nil`;
-          const headers = renderHeaders(testCase.request.headers ?? {});
+          const headers = renderHeaders(identityHeaders(testCase));
           const queryBlock = renderQuery((testCase.request.query as Record<string, unknown>) ?? {});
+          const bodyAssertionComments = renderBodyAssertionsComment(testCase, '\t//');
           const containsAsserts = (testCase.expected.contains ?? [])
             .map(
               (s) =>
@@ -92,7 +85,7 @@ export class GoTestFrameworkAdapter implements TestFrameworkAdapter {
             .join('\n');
 
           return `func ${fnName}(t *testing.T) {
-\t// ${testCase.category} coverage — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
+\t// ${testCase.category} coverage — identity: ${testCase.request.identity ?? 'primary'} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
 \tbaseURL := getEnv("API_BASE_URL", "http://localhost:3000")
 \t${bodyVar}
 \treq, err := http.NewRequest(${toGoString(testCase.request.method)}, baseURL + ${goPathExpr(testCase.request.path, toGoString)}, bodyReader)
@@ -109,6 +102,7 @@ ${renderStatusAssertionGo(testCase, 'resp.StatusCode', 'string(respBody)', '\t')
 ${ctAssert}
 ${headerAsserts}
 ${containsAsserts}
+${bodyAssertionComments}
 }`;
         })
         .join('\n\n');

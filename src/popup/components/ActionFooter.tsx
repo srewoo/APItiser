@@ -14,6 +14,11 @@ interface ActionFooterProps {
   onCancel: () => void;
   onClear: () => void;
   onExportPostman?: () => void;
+  onRunLocally?: () => void;
+  onRunRepoTests?: () => void;
+  localRunnerEnabled?: boolean;
+  canRunLocally?: boolean;
+  canRunRepoTests?: boolean;
   jobStage?: AppState['activeJob'] extends null ? undefined : string;
   readiness?: ReadinessState;
   readinessNotes?: string[];
@@ -33,6 +38,11 @@ export function ActionFooter({
   onCancel,
   onClear,
   onExportPostman,
+  onRunLocally,
+  onRunRepoTests,
+  localRunnerEnabled,
+  canRunLocally,
+  canRunRepoTests,
   jobStage,
   readiness,
   readinessNotes,
@@ -62,6 +72,16 @@ export function ActionFooter({
       <button type="button" onClick={onDownload} disabled={!hasArtifact}>
         Download {readiness === 'production_candidate' ? 'Validated Tests' : 'Tests'}
       </button>
+      {localRunnerEnabled && onRunLocally ? (
+        <button type="button" onClick={onRunLocally} disabled={busy || !canRunLocally}>
+          Run Locally
+        </button>
+      ) : null}
+      {localRunnerEnabled && onRunRepoTests ? (
+        <button type="button" className="ghost" onClick={onRunRepoTests} disabled={busy || !canRunRepoTests}>
+          Run Repo Tests
+        </button>
+      ) : null}
       {jobStage === 'complete' && onExportPostman ? (
         <button type="button" className="ghost" onClick={onExportPostman}>
           Export Postman

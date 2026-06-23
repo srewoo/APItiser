@@ -184,6 +184,141 @@ strong,
   letter-spacing: 0.03em;
 }
 
+.run-local-hint {
+  margin: 6px 0 0;
+  text-align: center;
+  font-size: 12px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.local-runner-help {
+  margin: 6px 0 10px;
+  border: 1px solid rgba(41, 36, 28, 0.16);
+  border-radius: 8px;
+  background: rgba(41, 36, 28, 0.03);
+  padding: 6px 10px;
+}
+
+.local-runner-help > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  list-style: revert;
+}
+
+.local-runner-help-body {
+  margin-top: 8px;
+}
+
+.local-runner-steps {
+  margin: 8px 0 4px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.cmd-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin: 6px 0 2px;
+}
+
+.cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  background: #1e1a14;
+  color: #f3ead7;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+}
+
+/* Keep the copy button compact; .utility-btn is width:100% by default. */
+.cmd-row .utility-btn {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.runner-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: rgba(41, 36, 28, 0.04);
+  border-radius: 0 6px 6px 0;
+}
+
+.runner-check {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(41, 36, 28, 0.04);
+  font-size: 12px;
+}
+
+.runner-check p {
+  margin: 0 0 4px;
+}
+
+.runner-check .check-ok {
+  color: #0b6b2f;
+  font-weight: 600;
+}
+
+.runner-check .check-bad {
+  color: #a70f24;
+  font-weight: 600;
+}
+
+.link-download {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 12px;
+  text-decoration: none;
+  text-align: center;
+}
+
+.link-download:hover {
+  opacity: 0.9;
+}
+
+.local-runner-help code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: rgba(41, 36, 28, 0.08);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.cmd code,
+.local-runner-help .cmd {
+  background: #1e1a14;
+}
+
 .grid {
   display: grid;
   gap: 8px;
@@ -211,6 +346,27 @@ label.inline-toggle {
 
 label.inline-toggle input {
   width: auto;
+}
+
+/* Checkbox rows: box on the left, label beside it (not stacked), and full-width inside a grid
+   so long labels don't get crushed into one column. */
+label.settings-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+label.settings-checkbox input {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.grid label.settings-checkbox {
+  grid-column: 1 / -1;
 }
 
 input,
@@ -589,6 +745,34 @@ button.ghost {
   border-color: rgba(41, 36, 28, 0.25);
   background: var(--surface-strong);
   color: var(--text);
+}
+
+/* The "Import Settings" control is a <label> wrapping a hidden file input; without this it
+   inherits the muted, column form-label style and reads as plain text. Make it look and sit
+   like the ghost button beside it. */
+label.settings-import-label {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-top: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid rgba(41, 36, 28, 0.25);
+  background: var(--surface-strong);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-weight: 600;
+  font-size: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: transform 140ms ease, filter 140ms ease;
+}
+
+label.settings-import-label:hover {
+  transform: translateY(-1px);
+  filter: saturate(1.1);
 }
 
 .error-banner {

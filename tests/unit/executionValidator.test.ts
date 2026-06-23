@@ -284,7 +284,18 @@ describe('validateGeneratedTestsAgainstBaseUrl', () => {
     expect(summary.results[0]?.failures.some((f) => f.type === 'auth')).toBe(true);
   });
 
-  it('marks validation as review-required when runtime auth is missing', async () => {
+  it('runs anyway (with a warning) when runtime auth is missing — does not skip', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 401,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => JSON.stringify({ error: 'unauthorized' }),
+        json: async () => ({ error: 'unauthorized' })
+      }))
+    );
+
     const summary = await validateGeneratedTestsAgainstBaseUrl(
       {
         ...DEFAULT_SETTINGS,
@@ -309,8 +320,12 @@ describe('validateGeneratedTestsAgainstBaseUrl', () => {
       [endpoint]
     );
 
-    expect(summary.attempted).toBe(0);
-    expect(summary.notRunReason).toContain('API token');
+    // It executes the test (not skipped), the auth-needing test fails on the 401, and a
+    // warning explains the missing credential — instead of a 0/0 hard skip.
+    expect(summary.attempted).toBe(1);
+    expect(summary.notRunReason).toBeUndefined();
+    expect(summary.failed).toBe(1);
+    expect((summary.warnings ?? []).some((w) => /token|Running anyway/i.test(w))).toBe(true);
   });
 
   it('accepts any 4xx for a negative test rather than the exact declared code', async () => {

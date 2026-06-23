@@ -174,9 +174,10 @@ describe('normalizeGeneratedTests', () => {
       endpoints
     });
 
-    // The job should succeed but the diagnostics should show that it failed the assessment
-    expect(result.tests).toHaveLength(1);
-    expect(result.tests[0].title).toBe('still generic');
+    // The job should succeed but the diagnostics should show that it failed the assessment.
+    // (The suite also includes deterministic security cases for this authenticated /:id
+    // endpoint, so we assert on the model-origin test rather than the exact total.)
+    expect(result.tests.some((test) => test.title === 'still generic')).toBe(true);
     expect(result.diagnostics).toHaveLength(1);
     expect(result.diagnostics[0].assessment.passed).toBe(false);
   });
@@ -308,7 +309,17 @@ describe('normalizeGeneratedTests', () => {
       onBatchComplete
     });
 
-    expect(result.tests).toHaveLength(4);
+    // All four repaired model tests must be present (the suite is additionally augmented
+    // with deterministic schema/security cases, so the total exceeds four).
+    const titles = result.tests.map((test) => test.title);
+    for (const expectedTitle of [
+      'creates user with valid email',
+      'rejects missing email on create user',
+      'handles long email input on create user',
+      'rejects unauthorized create user request'
+    ]) {
+      expect(titles).toContain(expectedTitle);
+    }
     expect(result.diagnostics[0]?.repairAttempted).toBe(true);
     expect(result.diagnostics[0]?.assessment.passed).toBe(true);
     expect(onBatchComplete).toHaveBeenCalledWith(

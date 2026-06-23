@@ -1,25 +1,16 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
 import { renderStatusAssertionJs } from '../statusExpectation';
-import { jsTemplatePath } from './runtimeTokens';
-
-const toJsHeaderValue = (value: string): string =>
-  value === 'Bearer {{API_TOKEN}}'
-    ? "(process.env.API_TOKEN ? `Bearer ${process.env.API_TOKEN}` : 'Bearer replace-me')"
-    : value === '{{API_KEY}}'
-      ? "(process.env.API_KEY || 'replace-me')"
-      : value === '{{CSRF_TOKEN}}'
-        ? "(process.env.CSRF_TOKEN || 'replace-me')"
-    : JSON.stringify(value);
+import { jsTemplatePath, jsHeaderValueExpr, identityHeaders } from './runtimeTokens';
+import { jsRuntimeHelpers, renderBodyAssertionsJs } from './assertions';
 
 const toJsHeadersObject = (headers: Record<string, string>): string => {
   const entries = Object.entries(headers);
   if (!entries.length) {
     return '{}';
   }
-
   return `{
-      ${entries.map(([key, value]) => `${JSON.stringify(key)}: ${toJsHeaderValue(value)}`).join(',\n      ')}
+      ${entries.map(([key, value]) => `${JSON.stringify(key)}: ${jsHeaderValueExpr(value)}`).join(',\n      ')}
     }`;
 };
 
@@ -47,7 +38,7 @@ export class JestFrameworkAdapter implements TestFrameworkAdapter {
         .map((testCase) => {
           const requestBody = JSON.stringify(testCase.request.body ?? null, null, 2);
           const requestQuery = JSON.stringify(testCase.request.query ?? {}, null, 2);
-          const requestHeaders = toJsHeadersObject(testCase.request.headers ?? {});
+          const requestHeaders = toJsHeadersObject(identityHeaders(testCase));
           const responseHeaders = JSON.stringify(testCase.expected.responseHeaders ?? {}, null, 2);
           const jsonSchema = toJsObject(testCase.expected.jsonSchema ?? null);
           const contains = testCase.expected.contains?.length
@@ -60,25 +51,18 @@ export class JestFrameworkAdapter implements TestFrameworkAdapter {
             ? `  for (const [key, value] of Object.entries(${responseHeaders})) {\n    expect(response.headers.get(key)).toBe(value);\n  }`
             : '  // No response-header assertions provided';
           const schemaChecks = testCase.expected.jsonSchema
-            ? `  const parsed = safeJsonParse(text);\n  assertSchemaShape(${jsonSchema}, parsed, 'response');`
+            ? `  assertSchemaShape(${jsonSchema}, body, 'response');`
             : '  // No schema assertions provided';
-          // Contract checks are free-text expectations (e.g. "auth boundary enforced") that
-          // cannot be auto-asserted; render them as documented expectations rather than a
-          // tautological `typeof === 'string'` assertion that verifies nothing.
-          const contractChecksBlock = testCase.expected.contractChecks?.length
-            ? testCase.expected.contractChecks
-                .map((value) => `  // Contract expectation (verify manually): ${String(value).replace(/\s+/g, ' ').trim()}`)
-                .join('\n')
-            : '  // No contract checks provided';
+          const bodyAssertions = renderBodyAssertionsJs(testCase, 'body', '  ', 'jest');
           const paginationCheck = testCase.expected.pagination
-            ? `  const parsedForPagination = safeJsonParse(text);\n  expect(isPaginatedShape(parsedForPagination)).toBe(true);`
+            ? `  expect(isPaginatedShape(body)).toBe(true);`
             : '  // Pagination not asserted';
           const idempotencyCheck = testCase.expected.idempotent
-            ? `  const repeat = await fetch(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {\n    method: ${JSON.stringify(testCase.request.method)},\n    headers: {\n      'Content-Type': 'application/json',\n      ...${requestHeaders}\n    },\n    body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined\n  });\n  expect(repeat.status).toBeLessThan(500);`
+            ? `  const repeat = await fetchWithRetry(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {\n    method: ${JSON.stringify(testCase.request.method)},\n    headers: {\n      'Content-Type': 'application/json',\n      ...${requestHeaders}\n    },\n    body: ${requestBody} !== null ? JSON.stringify(${requestBody}) : undefined\n  });\n  assertIdempotent({ status: response.status, json: body }, { status: repeat.status, json: safeJsonParse(await repeat.text()) });`
             : '  // Idempotency not asserted';
 
           return `test(${JSON.stringify(testCase.title)}, async () => {
-  // ${testCase.category} coverage
+  // ${testCase.category} coverage — identity: ${testCase.request.identity ?? 'primary'}
   // Trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
   const query = new URLSearchParams(
     Object.entries(${requestQuery}).reduce((acc, [key, value]) => {
@@ -89,7 +73,7 @@ export class JestFrameworkAdapter implements TestFrameworkAdapter {
     }, {})
   ).toString();
 
-  const response = await fetch(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {
+  const response = await fetchWithRetry(\`${'${BASE_URL}'}${jsTemplatePath(testCase.request.path)}${'${query ? `?${query}` : ""}'}\`, {
     method: ${JSON.stringify(testCase.request.method)},
     headers: {
       'Content-Type': 'application/json',
@@ -100,11 +84,12 @@ export class JestFrameworkAdapter implements TestFrameworkAdapter {
 
 ${renderStatusAssertionJs(testCase, 'response.status', '  ')}
   const text = await response.text();
+  const body = safeJsonParse(text);
 ${contains}
 ${contentType}
 ${headerChecks}
 ${schemaChecks}
-${contractChecksBlock}
+${bodyAssertions}
 ${paginationCheck}
 ${idempotencyCheck}
 });`;
@@ -129,48 +114,7 @@ const safeJsonParse = (text) => {
   }
 };
 
-const isPaginatedShape = (value) => Array.isArray(value)
-  || (value && typeof value === 'object'
-    && (['items', 'results', 'data'].some((key) => key in value) || Object.values(value).some((entry) => Array.isArray(entry))));
-
-const assertSchemaShape = (schema, value, path = 'response') => {
-  if (!schema) {
-    return;
-  }
-  if (schema.type === 'array') {
-    expect(Array.isArray(value)).toBe(true);
-    if (schema.items && Array.isArray(value) && value.length > 0) {
-      assertSchemaShape(schema.items, value[0], ${'`${path}[0]`'});
-    }
-    return;
-  }
-  if (schema.type === 'object') {
-    expect(value).not.toBeNull();
-    expect(typeof value).toBe('object');
-    for (const key of schema.required || []) {
-      expect(value).toHaveProperty(key);
-    }
-    for (const [key, child] of Object.entries(schema.properties || {})) {
-      if (value && Object.prototype.hasOwnProperty.call(value, key)) {
-        assertSchemaShape(child, value[key], ${'`${path}.${key}`'});
-      }
-    }
-    return;
-  }
-  if (schema.type === 'integer') {
-    expect(Number.isInteger(value)).toBe(true);
-    return;
-  }
-  if (schema.type === 'number') {
-    expect(typeof value).toBe('number');
-    return;
-  }
-  if (schema.type === 'boolean') {
-    expect(typeof value).toBe('boolean');
-    return;
-  }
-  expect(typeof value).toBe(schema.type || 'string');
-};
+${jsRuntimeHelpers('jest')}
 
 ${testBlocks}
 `

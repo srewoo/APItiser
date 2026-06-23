@@ -6,7 +6,11 @@ export interface ReadinessAssessment {
 }
 
 const hasStrongAssertions = (test: GeneratedTestCase): boolean =>
-  Boolean(test.expected.contentType || test.expected.jsonSchema || (test.expected.contractChecks?.length ?? 0) > 0);
+  Boolean(
+    test.expected.contentType
+    || test.expected.jsonSchema
+    || (test.expected.bodyAssertions?.length ?? 0) > 0
+  );
 
 export const assessReadiness = (
   tests: GeneratedTestCase[],

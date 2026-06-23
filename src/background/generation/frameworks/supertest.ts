@@ -1,16 +1,10 @@
 import type { GeneratedFile, GeneratedTestCase, ProjectMeta, TestFrameworkAdapter } from '@shared/types';
 import { getResourcePath } from './pathing';
 import { renderStatusAssertionJs } from '../statusExpectation';
-import { jsPathExpr } from './runtimeTokens';
+import { jsPathExpr, jsHeaderValueExpr, identityHeaders } from './runtimeTokens';
+import { jsRuntimeHelpers, renderBodyAssertionsJs } from './assertions';
 
-const headerValueExpr = (value: string): string =>
-  value === 'Bearer {{API_TOKEN}}'
-    ? "(process.env.API_TOKEN ? `Bearer ${process.env.API_TOKEN}` : 'Bearer replace-me')"
-    : value === '{{API_KEY}}'
-      ? "(process.env.API_KEY || 'replace-me')"
-      : value === '{{CSRF_TOKEN}}'
-        ? "(process.env.CSRF_TOKEN || 'replace-me')"
-        : JSON.stringify(value);
+const headerValueExpr = (value: string): string => jsHeaderValueExpr(value);
 
 const renderHeadersChain = (headers: Record<string, string>): string =>
   Object.entries(headers)
@@ -47,7 +41,7 @@ export class SupertestFrameworkAdapter implements TestFrameworkAdapter {
       const blocks = cases
         .map((testCase) => {
           const method = testCase.request.method.toLowerCase();
-          const headers = renderHeadersChain(testCase.request.headers ?? {});
+          const headers = renderHeadersChain(identityHeaders(testCase));
           const query = renderQueryChain((testCase.request.query as Record<string, unknown>) ?? {});
           const body =
             testCase.request.body !== undefined && testCase.request.body !== null
@@ -71,14 +65,10 @@ export class SupertestFrameworkAdapter implements TestFrameworkAdapter {
           const paginationAssert = testCase.expected.pagination
             ? '    expect(isPaginatedShape(response.body)).toBe(true);'
             : '';
-          const contractComments = testCase.expected.contractChecks?.length
-            ? testCase.expected.contractChecks
-                .map((v) => `    // Contract expectation (verify manually): ${String(v).replace(/\s+/g, ' ').trim()}`)
-                .join('\n')
-            : '';
+          const bodyAssertions = renderBodyAssertionsJs(testCase, 'response.body', '    ', 'jest');
 
           return `  test(${JSON.stringify(testCase.title)}, async () => {
-    // ${testCase.category} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
+    // ${testCase.category} — identity: ${testCase.request.identity ?? 'primary'} — trust: ${testCase.trustLabel ?? 'heuristic'} (${testCase.trustScore ?? 0})
     const response = await request(BASE_URL)
       .${method}(${jsPathExpr(testCase.request.path)})
       .set('Content-Type', 'application/json')
@@ -91,7 +81,7 @@ ${headerAsserts}
 ${containsAsserts}
 ${schemaAsserts}
 ${paginationAssert}
-${contractComments}
+${bodyAssertions}
   });`;
         })
         .join('\n\n');
@@ -105,48 +95,7 @@ ${contractComments}
 const request = require('supertest');
 const BASE_URL = process.env.API_BASE_URL || 'http://localhost:3000';
 
-const isPaginatedShape = (value) => Array.isArray(value)
-  || (value && typeof value === 'object'
-    && (['items', 'results', 'data'].some((key) => key in value) || Object.values(value).some((entry) => Array.isArray(entry))));
-
-const assertSchemaShape = (schema, value, path = 'response') => {
-  if (!schema) {
-    return;
-  }
-  if (schema.type === 'array') {
-    expect(Array.isArray(value)).toBe(true);
-    if (schema.items && Array.isArray(value) && value.length > 0) {
-      assertSchemaShape(schema.items, value[0], \`\${path}[0]\`);
-    }
-    return;
-  }
-  if (schema.type === 'object') {
-    expect(value).not.toBeNull();
-    expect(typeof value).toBe('object');
-    for (const key of schema.required || []) {
-      expect(value).toHaveProperty(key);
-    }
-    for (const [key, child] of Object.entries(schema.properties || {})) {
-      if (value && Object.prototype.hasOwnProperty.call(value, key)) {
-        assertSchemaShape(child, value[key], \`\${path}.\${key}\`);
-      }
-    }
-    return;
-  }
-  if (schema.type === 'integer') {
-    expect(Number.isInteger(value)).toBe(true);
-    return;
-  }
-  if (schema.type === 'number') {
-    expect(typeof value).toBe('number');
-    return;
-  }
-  if (schema.type === 'boolean') {
-    expect(typeof value).toBe('boolean');
-    return;
-  }
-  expect(typeof value).toBe(schema.type || 'string');
-};
+${jsRuntimeHelpers('jest')}
 
 describe(${JSON.stringify(groupKey)}, () => {
 ${blocks}

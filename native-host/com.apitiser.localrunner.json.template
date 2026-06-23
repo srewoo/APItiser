@@ -1,0 +1,7 @@
+{
+  "name": "com.apitiser.localrunner",
+  "description": "APItiser local runner — boots a repo via runLocal for live test validation.",
+  "path": "ABSOLUTE_PATH_TO/apitiser-runner.mjs",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID/"]
+}

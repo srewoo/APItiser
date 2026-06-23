@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState, RepoRef, TestCategory } from '@shared/types';
-import type { EventMessage } from '@shared/messages';
+import type { EventMessage, LocalRunnerStatus } from '@shared/messages';
 import { sendCommand } from './runtime';
 import { parseRepoFromUrl } from '@shared/repo';
 import { usePopupState } from './hooks/usePopupState';
@@ -34,16 +34,17 @@ const deriveContextIdFromTab = (tab?: chrome.tabs.Tab): string => {
 };
 
 export function App() {
-  const { appState, setContextId: setPopupContextId, error, setError } = usePopupState();
-  const [localAppState, setLocalAppState] = useState<AppState | null>(null);
-  const mergedAppState = appState ?? localAppState;
-  const setAppState = (state: AppState | null) => setLocalAppState(state);
+  // Single source of truth: the hook owns appState (updated by both command responses via
+  // setAppState and by pushed JOB_*/STATE_SNAPSHOT events). No second shadow store.
+  const { appState, setAppState, setContextId: setPopupContextId, error, setError } = usePopupState();
+  const mergedAppState = appState;
   const [repo, setRepo] = useState<RepoRef | null>(null);
   const [notice, setNotice] = useState<string>('Connecting to APItiser worker...');
   const [testDirsInput, setTestDirsInput] = useState<string>('tests, __tests__, test');
   const [openApiFallbackInput, setOpenApiFallbackInput] = useState<string>('');
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [previewOpen, setPreviewOpen] = useState<boolean>(false);
+  const [runnerCheck, setRunnerCheck] = useState<{ checking: boolean; result?: LocalRunnerStatus }>({ checking: false });
   const [contextId, setContextIdLocal] = useState<string>('global');
   const [selectedEndpointIds, setSelectedEndpointIds] = useState<string[]>([]);
   const [methodFilter, setMethodFilter] = useState<string>('ALL');
@@ -296,6 +297,44 @@ export function App() {
     setNotice('Postman collection downloaded');
   };
 
+  const handleDownloadRunner = async () => {
+    setNotice('Preparing local runner download…');
+    const response = await sendCommand<EventMessage>({ type: 'DOWNLOAD_RUNNER', contextId });
+    if (response.type === 'JOB_ERROR') { setError(response.error); return; }
+    setNotice('Local runner download started — unzip it, then run ./install.sh');
+  };
+
+  const handleCheckLocalRunner = async () => {
+    setRunnerCheck({ checking: true });
+    const response = await sendCommand<EventMessage>({ type: 'CHECK_LOCAL_RUNNER', contextId });
+    if (response.type === 'LOCAL_RUNNER_STATUS') {
+      setRunnerCheck({ checking: false, result: response.payload });
+    } else {
+      setRunnerCheck({ checking: false, result: { hostOk: false, hostMessage: 'Check failed.', serviceOk: false } });
+    }
+  };
+
+  const handleRunLocally = async () => {
+    setNotice('Booting the local service via runLocal…');
+    const response = await sendCommand<EventMessage>({ type: 'RUN_LOCALLY', contextId });
+    if (response.type === 'JOB_ERROR') { setError(response.error); return; }
+    // Only claim success on the actual completion event — don't assert "validation applied"
+    // for an unexpected response shape.
+    if (response.type === 'JOB_COMPLETE') {
+      setNotice('Local run complete — validation results applied');
+    }
+  };
+
+  const handleRunRepoTests = async () => {
+    setNotice('Running the repo\'s existing tests locally…');
+    const response = await sendCommand<EventMessage>({ type: 'RUN_REPO_TESTS', contextId });
+    if (response.type === 'JOB_ERROR') { setError(response.error); return; }
+    if (response.type === 'JOB_COMPLETE') {
+      const r = response.payload.activeJob?.localTestRun;
+      setNotice(r ? (r.passed ? 'Repo tests passed' : `Repo tests failed (exit ${r.exitCode})`) : 'Repo test run finished');
+    }
+  };
+
   const handleExportSettings = () => {
     if (!mergedAppState) return;
     const {
@@ -398,6 +437,9 @@ export function App() {
             onOpenDoc={(path) => void openExtensionDoc(path)}
             onExportSettings={handleExportSettings}
             onImportSettings={(file) => void handleImportSettings(file)}
+            onDownloadRunner={() => void handleDownloadRunner()}
+            onCheckLocalRunner={() => void handleCheckLocalRunner()}
+            runnerCheck={runnerCheck}
           />
         </ErrorBoundary>
       ) : null}
@@ -464,6 +506,15 @@ export function App() {
         </div>
       ) : null}
 
+      {generatedTests.length > 0 && !mergedAppState?.settings.enableLocalRunner ? (
+        <p className="subtle run-local-hint">
+          Want to run these against your repo automatically?{' '}
+          <button type="button" className="link-btn" onClick={() => setSettingsOpen(true)}>
+            Set up local runs
+          </button>
+        </p>
+      ) : null}
+
       <ActionFooter
         busy={busy}
         hasRepo={Boolean(repo)}
@@ -478,6 +529,11 @@ export function App() {
         onCancel={() => void handleCancel()}
         onClear={() => void handleClear()}
         onExportPostman={() => void handleExportPostman()}
+        onRunLocally={() => void handleRunLocally()}
+        onRunRepoTests={() => void handleRunRepoTests()}
+        localRunnerEnabled={Boolean(mergedAppState?.settings.enableLocalRunner)}
+        canRunLocally={generatedTests.length > 0}
+        canRunRepoTests={endpoints.length > 0}
         jobStage={activeOrLatestJob?.stage}
         readiness={readiness}
         readinessNotes={readinessNotes}
