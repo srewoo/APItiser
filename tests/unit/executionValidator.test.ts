@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { validateGeneratedTestsAgainstBaseUrl } from '@background/generation/executionValidator';
+import {
+  validateGeneratedTestsAgainstBaseUrl,
+  buildUrl,
+  isReissuableForIdempotency
+} from '@background/generation/executionValidator';
 import { DEFAULT_SETTINGS } from '@shared/constants';
 import type { ApiEndpoint, GeneratedTestCase } from '@shared/types';
 
@@ -227,7 +231,7 @@ describe('validateGeneratedTestsAgainstBaseUrl', () => {
     expect(types).toContain('header');
   });
 
-  it('records a network failure type when the request throws', async () => {
+  it('treats a lone request that cannot connect as "server unreachable", not a failing test', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -249,9 +253,10 @@ describe('validateGeneratedTestsAgainstBaseUrl', () => {
       [endpoint]
     );
 
-    expect(summary.failed).toBe(1);
-    expect(summary.results[0]?.failures.some((f) => f.type === 'network')).toBe(true);
-    expect(summary.results[0]?.failures[0]?.message).toContain('connection refused');
+    // Nothing answered at all → not a test failure (and nothing for the LLM to repair).
+    expect(summary.failed).toBe(0);
+    expect(summary.skipped).toBe(1);
+    expect(summary.notRunReason).toContain("Couldn't reach http://localhost:3000");
   });
 
   it('classifies a status mismatch on a security test as an auth failure', async () => {
@@ -417,5 +422,202 @@ describe('validateGeneratedTestsAgainstBaseUrl', () => {
     // The {{USER_ID}} token must have been resolved to the captured id before the request.
     expect(requestedUrls.some((url) => url.includes('/users/4242'))).toBe(true);
     expect(requestedUrls.some((url) => url.includes('{{USER_ID}}'))).toBe(false);
+  });
+});
+
+describe('buildUrl', () => {
+  it('preserves a base path prefix instead of dropping it', () => {
+    expect(buildUrl('https://api.example.com/v1', '/users')).toBe('https://api.example.com/v1/users');
+    expect(buildUrl('https://api.example.com/v1/', '/users/1')).toBe('https://api.example.com/v1/users/1');
+  });
+
+  it('handles a bare origin and appends query params', () => {
+    expect(buildUrl('http://localhost:3000', '/health')).toBe('http://localhost:3000/health');
+    expect(buildUrl('http://localhost:3000', '/items', { page: 2 })).toBe('http://localhost:3000/items?page=2');
+  });
+
+  it('uses an absolute path as-is', () => {
+    expect(buildUrl('https://api.example.com/v1', 'https://other.host/x')).toBe('https://other.host/x');
+  });
+});
+
+describe('isReissuableForIdempotency', () => {
+  it('re-issues safe idempotent methods but never DELETE', () => {
+    expect(isReissuableForIdempotency('GET')).toBe(true);
+    expect(isReissuableForIdempotency('put')).toBe(true);
+    expect(isReissuableForIdempotency('HEAD')).toBe(true);
+    // DELETE is spec-idempotent but destructive to re-issue → excluded.
+    expect(isReissuableForIdempotency('DELETE')).toBe(false);
+    expect(isReissuableForIdempotency('POST')).toBe(false);
+  });
+});
+
+describe('validation concurrency and time budget', () => {
+  it('runs independent tests concurrently (peak in-flight > 1)', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 15));
+        inFlight -= 1;
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          text: async () => JSON.stringify({ id: 1 }),
+          json: async () => ({ id: 1 })
+        };
+      })
+    );
+
+    const tests: GeneratedTestCase[] = Array.from({ length: 6 }, (_, i) => ({
+      endpointId: endpoint.id,
+      category: 'positive',
+      title: `case ${i}`,
+      request: { method: 'GET', path: '/users/1' },
+      expected: { status: 200 }
+    }));
+
+    const summary = await validateGeneratedTestsAgainstBaseUrl(
+      { ...DEFAULT_SETTINGS, baseUrl: 'http://localhost:3000', validationConcurrency: 4 },
+      tests,
+      [endpoint]
+    );
+
+    expect(summary.attempted).toBe(6);
+    expect(peak).toBeGreaterThan(1);
+  });
+
+  it('runs serially when the suite declares lifecycle ordering', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 10));
+        inFlight -= 1;
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          text: async () => JSON.stringify({ id: 1 }),
+          json: async () => ({ id: 1 })
+        };
+      })
+    );
+
+    const tests: GeneratedTestCase[] = [
+      { endpointId: endpoint.id, category: 'positive', title: 'create', order: 0, isSetup: true, request: { method: 'GET', path: '/users/1' }, expected: { status: 200 } },
+      { endpointId: endpoint.id, category: 'positive', title: 'use', order: 1, request: { method: 'GET', path: '/users/1' }, expected: { status: 200 } }
+    ];
+
+    const summary = await validateGeneratedTestsAgainstBaseUrl(
+      { ...DEFAULT_SETTINGS, baseUrl: 'http://localhost:3000', validationConcurrency: 4 },
+      tests,
+      [endpoint]
+    );
+
+    expect(summary.attempted).toBe(2);
+    expect(peak).toBe(1);
+  });
+
+  it('stops launching new tests and reports skipped when the time budget is exceeded', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          text: async () => JSON.stringify({ id: 1 }),
+          json: async () => ({ id: 1 })
+        };
+      })
+    );
+
+    const tests: GeneratedTestCase[] = Array.from({ length: 8 }, (_, i) => ({
+      endpointId: endpoint.id,
+      category: 'positive',
+      title: `case ${i}`,
+      request: { method: 'GET', path: '/users/1' },
+      expected: { status: 200 }
+    }));
+
+    // Budget of 1ms guarantees the deadline passes after the first wave.
+    const summary = await validateGeneratedTestsAgainstBaseUrl(
+      { ...DEFAULT_SETTINGS, baseUrl: 'http://localhost:3000', validationConcurrency: 2, validationBudgetMs: 1 },
+      tests,
+      [endpoint]
+    );
+
+    expect(summary.skipped).toBeGreaterThan(0);
+    expect(summary.warnings?.some((w) => w.includes('time budget'))).toBe(true);
+  });
+});
+
+describe('unreachable server', () => {
+  const settings = { ...DEFAULT_SETTINGS, baseUrl: 'http://localhost:3000', retryOnRateLimit: false };
+  const makeTest = (title: string, path = '/users/1'): GeneratedTestCase => ({
+    endpointId: endpoint.id,
+    category: 'positive',
+    title,
+    request: { method: 'GET', path },
+    expected: { status: 200 }
+  });
+
+  it('reports one clear "not run" reason instead of N failing tests when nothing answers', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+
+    const summary = await validateGeneratedTestsAgainstBaseUrl(settings, [makeTest('a'), makeTest('b')], [endpoint]);
+
+    expect(summary).toMatchObject({ attempted: 0, passed: 0, failed: 0, skipped: 2, results: [] });
+    expect(summary.notRunReason).toContain("Couldn't reach http://localhost:3000");
+    expect(summary.targetBaseUrl).toBe('http://localhost:3000');
+  });
+
+  it('keeps real results when only some requests fail to connect, with a readable reason', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          text: async () => '{"id":1}'
+        })
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    );
+
+    const summary = await validateGeneratedTestsAgainstBaseUrl(
+      { ...settings, validationConcurrency: 1 },
+      [makeTest('ok'), makeTest('dropped')],
+      [endpoint]
+    );
+
+    expect(summary).toMatchObject({ attempted: 2, passed: 1, failed: 1 });
+    expect(summary.notRunReason).toBeUndefined();
+    expect(summary.results[1]!.failures[0]!.message).toBe(
+      'Could not connect to http://localhost:3000 (Failed to fetch) — is the API running?'
+    );
+  });
+});
+
+describe('failure verdicts', () => {
+  it('marks a 500 as a likely API bug with a reason', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500, headers: new Headers(), text: async () => 'boom' }));
+    const summary = await validateGeneratedTestsAgainstBaseUrl(
+      { ...DEFAULT_SETTINGS, baseUrl: 'http://localhost:3000', retryOnRateLimit: false },
+      [{ endpointId: endpoint.id, category: 'positive', title: 'gets a user', request: { method: 'GET', path: '/users/1' }, expected: { status: 200 } }],
+      [endpoint]
+    );
+    expect(summary.results[0]).toMatchObject({ success: false, verdict: 'api' });
+    expect(summary.results[0]!.verdictReason).toContain('bug in the API');
   });
 });

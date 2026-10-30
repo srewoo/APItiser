@@ -15,7 +15,32 @@ interface EndpointListProps {
   onSelectAll: () => void;
   onClearAll: () => void;
   activeOrLatestJob: JobState | null;
+  /** Per-endpoint run; omitted when there is nothing to run against. */
+  onRunEndpoint?: (endpointId: string) => void;
+  runDisabled?: boolean;
 }
+
+interface EndpointRunInfo {
+  tests: number;
+  passed: number;
+  ran: number;
+}
+
+const buildRunInfo = (job: JobState | null): Map<string, EndpointRunInfo> => {
+  const info = new Map<string, EndpointRunInfo>();
+  const entry = (id: string): EndpointRunInfo => {
+    const existing = info.get(id) ?? { tests: 0, passed: 0, ran: 0 };
+    info.set(id, existing);
+    return existing;
+  };
+  for (const test of job?.generatedTests ?? []) entry(test.endpointId).tests += 1;
+  for (const result of job?.validationSummary?.results ?? []) {
+    const item = entry(result.endpointId);
+    item.ran += 1;
+    if (result.success) item.passed += 1;
+  }
+  return info;
+};
 
 const METHODS = ['ALL', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
 
@@ -33,7 +58,12 @@ export function EndpointList({
   onSelectAll,
   onClearAll,
   activeOrLatestJob,
+  onRunEndpoint,
+  runDisabled,
 }: EndpointListProps) {
+  const runInfo = buildRunInfo(activeOrLatestJob);
+  const activeRun = activeOrLatestJob?.endpointRun;
+  const runningIds = new Set(activeRun?.endpointIds ?? []);
   const filteredEndpoints = methodFilter === 'ALL'
     ? endpoints
     : endpoints.filter((ep) => ep.method === methodFilter);
@@ -54,6 +84,7 @@ export function EndpointList({
               <button
                 key={method}
                 type="button"
+                aria-pressed={methodFilter === method}
                 className={`chip ${methodFilter === method ? 'active' : ''}`}
                 onClick={() => onMethodFilterChange(method)}
               >
@@ -78,6 +109,7 @@ export function EndpointList({
             {filteredEndpoints.map((endpoint) => {
               const blockedBySkip = skipExistingEnabled && existingCoveredSet.has(endpoint.id);
               const checked = selectedEndpointSet.has(endpoint.id) && !blockedBySkip;
+              const info = runInfo.get(endpoint.id);
               return (
                 <label key={endpoint.id} className={`endpoint-row ${checked ? 'checked' : 'unchecked'}`}>
                   <input
@@ -111,6 +143,30 @@ export function EndpointList({
                       </em>
                     ) : null}
                     {existingCoveredSet.has(endpoint.id) ? <em className="endpoint-tag">existing test</em> : null}
+                    {info?.ran ? (
+                      <em
+                        className={`run-badge ${info.passed === info.ran ? 'pass' : 'fail'}`}
+                        title="Live results: passed / run"
+                      >
+                        {info.passed}/{info.ran}
+                      </em>
+                    ) : null}
+                    {onRunEndpoint && info?.tests ? (
+                      <button
+                        type="button"
+                        className="ghost run-endpoint-btn"
+                        aria-label={`Run tests for ${endpoint.method} ${endpoint.path}`}
+                        title={`Run ${info.tests} test(s)`}
+                        disabled={runDisabled || Boolean(activeRun)}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onRunEndpoint(endpoint.id);
+                        }}
+                      >
+                        {runningIds.has(endpoint.id) ? '…' : '▶'}
+                      </button>
+                    ) : null}
                   </div>
                 </label>
               );

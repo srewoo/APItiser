@@ -170,4 +170,37 @@ describe('parseCodeRoutes', () => {
       )
     ).toBe(true);
   });
+
+  it('attributes auth to the route whose local context references it, not every route in the file', () => {
+    const filler = Array.from({ length: 40 }, (_, i) => `          // spacer line ${i}`).join('\n');
+    const endpoints = parseCodeRoutes([
+      {
+        path: 'src/routes/mixed.ts',
+        content: `
+          import { Router } from 'express';
+          const router = Router();
+
+          router.get('/secure', (req, res) => {
+            const token = req.headers.authorization; // bearer token check
+            res.json({ ok: true });
+          });
+
+${filler}
+
+          router.get('/public', (req, res) => {
+            res.json({ ok: true });
+          });
+
+          export default router;
+        `
+      }
+    ]);
+
+    const secure = endpoints.find((e) => e.path === '/secure');
+    const publicRoute = endpoints.find((e) => e.path === '/public');
+    expect(secure?.auth).toBe('bearer');
+    // The public route is far from any auth reference, so it is NOT tagged (file-global
+    // inference used to tag it too).
+    expect(publicRoute?.auth).toBe('unknown');
+  });
 });

@@ -5,6 +5,7 @@ import type {
   ExtensionSettings,
   GeneratedArtifact,
   JobState,
+  LocalServiceState,
   RepoValidationResult,
   RunMetric
 } from '@shared/types';
@@ -25,6 +26,8 @@ interface ContextState {
 interface StoredStateV2 {
   settings: ExtensionSettings;
   contexts: Record<string, ContextState>;
+  /** Extension-wide: only one local service runs at a time (it owns a single port). */
+  localService?: LocalServiceState;
 }
 
 const resolveContextId = (contextId?: string): string => {
@@ -63,7 +66,8 @@ const toAppState = (store: StoredStateV2, contextId: string): AppState => {
     jobHistory: context.jobHistory,
     artifacts: context.artifacts,
     metricsHistory: context.metricsHistory,
-    lastValidation: context.lastValidation
+    lastValidation: context.lastValidation,
+    localService: store.localService
   };
 };
 
@@ -86,7 +90,8 @@ const normalizeStore = (persisted: unknown): StoredStateV2 => {
 
     return {
       settings: { ...DEFAULT_SETTINGS, ...(value.settings ?? {}) },
-      contexts
+      contexts,
+      localService: value.localService
     };
   }
 
@@ -106,13 +111,63 @@ const normalizeStore = (persisted: unknown): StoredStateV2 => {
   return migrated;
 };
 
+// Ephemeral secrets. When a session store is available these live in memory-only
+// `chrome.storage.session` (cleared on browser close, never persisted to disk) rather than in
+// the on-disk local store. Provider/repo keys are intentionally NOT here — they must survive a
+// browser restart, so they stay in local storage.
+const SECRETS_KEY = 'apitiser.secrets.v1';
+const EPHEMERAL_SECRET_KEYS = [
+  'runtimeApiToken',
+  'runtimeApiKey',
+  'runtimeCsrfToken',
+  'runtimeSessionCookie',
+  'runtimeSecondaryApiToken',
+  'runtimeSecondaryApiKey',
+  'runtimeSecondarySessionCookie',
+  'runtimeValues'
+] as const satisfies ReadonlyArray<keyof ExtensionSettings>;
+
+// The local service's status lives under its OWN key. Job writes read-modify-write the whole
+// state object; sharing it meant a job write that raced a status change (e.g. "the API crashed")
+// would write the stale status back. Separate keys make that lost update impossible.
+const SERVICE_KEY = 'apitiser.localService.v1';
+
 const loadStore = async (): Promise<StoredStateV2> => {
-  const raw = await getPlatform().storage.get(STORAGE_KEY);
-  return normalizeStore(raw);
+  const platform = getPlatform();
+  const store = normalizeStore(await platform.storage.get(STORAGE_KEY));
+  const service = (await platform.storage.get(SERVICE_KEY)) as LocalServiceState | undefined;
+  store.localService = service ?? store.localService;
+  if (platform.session) {
+    const secrets = (await platform.session.get(SECRETS_KEY)) as Partial<ExtensionSettings> | undefined;
+    if (secrets) {
+      store.settings = { ...store.settings, ...secrets };
+    }
+  }
+  return store;
 };
 
-const saveStore = async (store: StoredStateV2): Promise<void> => {
-  await getPlatform().storage.set(STORAGE_KEY, store);
+const saveStore = async (input: StoredStateV2): Promise<void> => {
+  const platform = getPlatform();
+  // Never persist the service status with the state object (see SERVICE_KEY).
+  const { localService: _service, ...store } = input;
+  if (!platform.session) {
+    await platform.storage.set(STORAGE_KEY, store);
+    return;
+  }
+  // Separate the ephemeral secrets out to session storage; write the rest to disk. Clone so the
+  // in-memory `store` (returned to callers) keeps the secrets — only the persisted copy drops them.
+  const settingsForLocal: ExtensionSettings = { ...store.settings };
+  const secrets: Partial<ExtensionSettings> = {};
+  const localAsRecord = settingsForLocal as unknown as Record<string, unknown>;
+  const secretsAsRecord = secrets as unknown as Record<string, unknown>;
+  for (const key of EPHEMERAL_SECRET_KEYS) {
+    if (localAsRecord[key] !== undefined) {
+      secretsAsRecord[key] = localAsRecord[key];
+      delete localAsRecord[key];
+    }
+  }
+  await platform.storage.set(STORAGE_KEY, { ...store, settings: settingsForLocal });
+  await platform.session.set(SECRETS_KEY, secrets);
 };
 
 const updateContext = (store: StoredStateV2, contextId: string, patch: Partial<ContextState>): void => {
@@ -248,6 +303,26 @@ export async function clearContext(contextId?: string): Promise<AppState> {
   const resolved = resolveContextId(contextId);
   const store = await loadStore();
   store.contexts[resolved] = defaultContextState();
+  await saveStore(store);
+  return toAppState(store, resolved);
+}
+
+/**
+ * Record the local service's lifecycle. Written only here (never by saveState) so a stale
+ * AppState snapshot can't clobber a newer service status.
+ */
+export async function setLocalService(service: LocalServiceState, contextId?: string): Promise<AppState> {
+  const resolved = resolveContextId(contextId);
+  await getPlatform().storage.set(SERVICE_KEY, service);
+  return toAppState(await loadStore(), resolved);
+}
+
+/** Make `artifact` the newest download for this context (after tests change post-generation). */
+export async function addArtifact(artifact: GeneratedArtifact, contextId?: string): Promise<AppState> {
+  const resolved = resolveContextId(contextId);
+  const store = await loadStore();
+  const context = store.contexts[resolved] ?? defaultContextState();
+  updateContext(store, resolved, { artifacts: [artifact, ...context.artifacts].slice(0, maxArtifacts) });
   await saveStore(store);
   return toAppState(store, resolved);
 }

@@ -295,7 +295,7 @@ describe('ProgressTimeline', () => {
       />
     );
     expect(screen.getByText('No active job')).toBeTruthy();
-    expect(screen.getByText('generating')).toBeTruthy();
+    expect(screen.getByText('3. Generate')).toBeTruthy();
     expect(screen.getByText('0%')).toBeTruthy();
   });
 

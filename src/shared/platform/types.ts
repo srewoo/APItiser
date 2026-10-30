@@ -91,6 +91,13 @@ export interface NativeMessagingAdapter {
 
 export interface Platform {
   storage: StorageAdapter;
+  /**
+   * Optional in-memory (session) storage — `chrome.storage.session` in MV3, cleared when the
+   * browser closes and never written to disk. Used for ephemeral secrets (runtime validation
+   * credentials). Absent on platforms/tests that don't provide it, in which case callers fall
+   * back to persistent `storage`.
+   */
+  session?: StorageAdapter;
   runtime: RuntimeMessagingAdapter;
   lifecycle: LifecycleAdapter;
   downloads: DownloadsAdapter;

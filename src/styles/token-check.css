@@ -1,0 +1,75 @@
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  min-height: 100vh;
+}
+
+body {
+  min-height: 100vh;
+  max-height: none;
+  font-family: 'Avenir Next', 'Segoe UI Variable', 'Trebuchet MS', sans-serif;
+}
+
+.token-check-page {
+  width: min(1040px, 100%);
+  margin: 0 auto;
+  padding: 44px 28px 64px;
+}
+
+.token-check-page header {
+  max-width: 650px;
+  margin-bottom: 28px;
+}
+
+.token-check-page h1 {
+  margin: 4px 0 10px;
+  font-size: clamp(32px, 5vw, 48px);
+}
+
+.token-check-page header > p:last-child {
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.token-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.token-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+
+.token-card-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.token-card h2 { margin: 0 0 4px; font-size: 20px; }
+.token-card-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.token-card label { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.token-card input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; color: var(--text); background: #fff; font: inherit; }
+.token-card input:focus { outline: 2px solid rgba(11, 95, 122, 0.25); border-color: var(--accent); }
+.token-card-footer { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+.token-card button { border: 0; border-radius: 8px; background: var(--accent); color: #fff; padding: 9px 13px; font: inherit; font-weight: 700; cursor: pointer; }
+.token-card button:disabled { opacity: 0.65; cursor: wait; }
+.token-result { border-radius: 999px; padding: 5px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; background: var(--accent-soft); color: var(--accent); }
+.token-result.valid, .token-message.valid { color: #176936; }
+.token-result.invalid, .token-message.invalid { color: var(--danger); }
+.token-message { margin: 0; font-size: 13px; line-height: 1.35; }
+
+@media (max-width: 680px) {
+  .token-check-page { padding: 28px 16px 40px; }
+  .token-check-grid { grid-template-columns: 1fr; }
+}

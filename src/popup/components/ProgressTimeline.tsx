@@ -10,6 +10,16 @@ interface ProgressTimelineProps {
 const stageOrder = ['scanning', 'parsing', 'generating', 'validating', 'packaging', 'complete'] as const;
 type JobStage = typeof stageOrder[number] | 'idle' | 'error' | 'cancelled';
 
+// Human-readable labels so users don't see internal stage names ("parsing", "packaging").
+const STAGE_LABELS: Record<typeof stageOrder[number], string> = {
+  scanning: 'Scan',
+  parsing: 'Detect',
+  generating: 'Generate',
+  validating: 'Validate',
+  packaging: 'Package',
+  complete: 'Done'
+};
+
 const isActiveStage = (stage: JobStage | undefined, check: typeof stageOrder[number]): 'done' | 'active' | 'todo' => {
   if (!stage || stage === 'idle') return 'todo';
   const currentIndex = stageOrder.indexOf(stage as typeof stageOrder[number]);
@@ -25,9 +35,9 @@ export function ProgressTimeline({ activeOrLatestJob, visibleQualityIssues, qual
     <section className="panel timeline">
       <h2>Progress</h2>
       <div className="steps">
-        {stageOrder.map((stage) => (
+        {stageOrder.map((stage, index) => (
           <span key={stage} className={`step ${isActiveStage(activeOrLatestJob?.stage as JobStage, stage)}`}>
-            {stage}
+            {index + 1}. {STAGE_LABELS[stage]}
           </span>
         ))}
       </div>
@@ -47,6 +57,11 @@ export function ProgressTimeline({ activeOrLatestJob, visibleQualityIssues, qual
             <strong>Quality gate:</strong> {qualityStatusLabel}
             {activeOrLatestJob?.repairAttempts ? ` • repair passes ${activeOrLatestJob.repairAttempts}` : ''}
           </p>
+          {qualityStatusLabel === 'failed' && activeOrLatestJob?.validationSummary?.failed ? (
+            <p className="quality-issue error">
+              {activeOrLatestJob.validationSummary.failed} test(s) failed against the live API — details under Live validation.
+            </p>
+          ) : null}
           {latestBatchDiagnostic?.repairAttempted ? (
             <p className="subtle">Latest batch required repair before acceptance.</p>
           ) : null}

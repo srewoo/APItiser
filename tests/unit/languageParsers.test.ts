@@ -136,11 +136,12 @@ func main() {
     const fileWithGroup = makeFile(
       'main.go',
       `
+r := gin.Default()
 v1 := r.Group("/api")
 v1.GET("/users", h)
 `
     );
-    const fileWithout = makeFile('simple.go', `r.GET("/users", h)`);
+    const fileWithout = makeFile('simple.go', `r := gin.Default()\nr.GET("/users", h)`);
 
     const withGroup = parseGoRoutes([fileWithGroup]);
     const without = parseGoRoutes([fileWithout]);
@@ -149,6 +150,13 @@ v1.GET("/users", h)
 
   it('ignores non-go files', () => {
     const file = makeFile('main.ts', `r.GET("/users", handler)`);
+    expect(parseGoRoutes([file])).toHaveLength(0);
+  });
+
+  it('does not treat an arbitrary .go file with no router signal as a gin router', () => {
+    // `thing.GET(...)` where `thing` is not a router — previously defaulted to gin and
+    // produced a bogus route. With no gin import/usage, it should yield nothing.
+    const file = makeFile('helpers.go', `package util\nfunc x() { config.GET("timeout") }`);
     expect(parseGoRoutes([file])).toHaveLength(0);
   });
 });
@@ -240,6 +248,29 @@ public class RootController {}
     );
     const routes = parseSpringRoutes([file]);
     expect(routes).toHaveLength(0);
+  });
+
+  it('marks a @RequestBody DTO field required when it carries a Bean Validation annotation', () => {
+    const file = makeFile(
+      'src/UserController.java',
+      `
+@RestController
+public class UserController {
+    @PostMapping("/users")
+    public User createUser(@RequestBody CreateUserRequest req) { return user; }
+}
+
+class CreateUserRequest {
+    @NotBlank
+    private String email;
+    private String bio;
+}
+`
+    );
+    const routes = parseSpringRoutes([file]);
+    const post = routes.find((r) => r.method === 'POST');
+    expect(post?.body?.required ?? []).toContain('email');
+    expect(post?.body?.required ?? []).not.toContain('bio');
   });
 
   it('ignores non-java files', () => {

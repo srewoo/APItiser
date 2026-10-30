@@ -1,0 +1,272 @@
+/* Full-tab first-run wizard. Reuses the design tokens defined in popup.css (:root). */
+
+/* popup.css pins these to a fixed 390px popup width — reset for the full-tab onboarding page. */
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  min-height: 100vh;
+  margin: 0;
+}
+
+#root {
+  display: flex;
+  justify-content: center;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+.onboarding {
+  max-width: 720px;
+  margin: 0 auto;
+  min-height: 100vh;
+  padding: 40px 28px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.onboarding-head {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.onboarding-progress {
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex-wrap: wrap;
+}
+
+.onboarding-progress li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.onboarding-progress .dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.onboarding-progress li.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.onboarding-progress li.active .dot {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.onboarding-progress li.done .dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.onboarding-body {
+  flex: 1 1 auto;
+  background: var(--surface-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 28px;
+}
+
+.onboarding-step {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.onboarding-step h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.onboarding-step p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.onboarding-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  line-height: 1.5;
+}
+
+.onboarding-list.numbered {
+  list-style: decimal;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.field > span {
+  font-weight: 600;
+}
+
+.onboarding-actions-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.onboarding-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+  font-weight: 400;
+}
+
+.copy-field {
+  margin: 8px 0;
+}
+
+.copy-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.copy-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.copy-row code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.copy-btn {
+  flex: 0 0 auto;
+  min-width: 84px;
+}
+
+.onboarding-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.onboarding-check-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+}
+
+.onboarding-step textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface-strong);
+}
+
+.onboarding-note {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  padding: 12px 14px;
+  margin: 6px 0;
+}
+
+.onboarding-note > strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+@media (max-width: 560px) {
+  .onboarding-two-col,
+  .onboarding-check-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.key-status {
+  font-size: 13px;
+}
+
+.key-status.ok {
+  color: var(--accent);
+}
+
+.key-status.fail {
+  color: var(--danger);
+}
+
+.onboarding-ok {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.onboarding-warn {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.onboarding-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.onboarding-foot .foot-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

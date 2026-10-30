@@ -73,7 +73,7 @@ export function ActionFooter({
         Download {readiness === 'production_candidate' ? 'Validated Tests' : 'Tests'}
       </button>
       {localRunnerEnabled && onRunLocally ? (
-        <button type="button" onClick={onRunLocally} disabled={busy || !canRunLocally}>
+        <button type="button" className="ghost" onClick={onRunLocally} disabled={busy || !canRunLocally}>
           Run Locally
         </button>
       ) : null}

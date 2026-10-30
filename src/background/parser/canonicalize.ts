@@ -34,12 +34,19 @@ const mergeSchemaField = (left: SchemaField, right: SchemaField): SchemaField =>
 
 const isSchemaField = (value: SchemaObject | SchemaField): value is SchemaField => 'name' in value;
 
-const mergeSchema = (left?: SchemaObject, right?: SchemaObject): SchemaObject | undefined => {
+// Safety cap on recursion. Parsed schemas are finite trees (the OpenAPI parser breaks
+// $ref cycles), but a pathologically deep spec should degrade gracefully, not stack-overflow.
+const MAX_SCHEMA_MERGE_DEPTH = 60;
+
+const mergeSchema = (left?: SchemaObject, right?: SchemaObject, depth = 0): SchemaObject | undefined => {
   if (!left) {
     return right;
   }
   if (!right) {
     return left;
+  }
+  if (depth >= MAX_SCHEMA_MERGE_DEPTH) {
+    return { ...left, ...right, description: right.description ?? left.description };
   }
 
   const properties: Record<string, SchemaObject | SchemaField> = {};
@@ -58,7 +65,7 @@ const mergeSchema = (left?: SchemaObject, right?: SchemaObject): SchemaObject | 
 
     properties[key] = isSchemaField(leftProp) && isSchemaField(rightProp)
       ? mergeSchemaField(leftProp, rightProp)
-      : mergeSchema(isSchemaField(leftProp) ? { type: leftProp.type, description: leftProp.description, example: leftProp.example } : leftProp, isSchemaField(rightProp) ? { type: rightProp.type, description: rightProp.description, example: rightProp.example } : rightProp)!;
+      : mergeSchema(isSchemaField(leftProp) ? { type: leftProp.type, description: leftProp.description, example: leftProp.example } : leftProp, isSchemaField(rightProp) ? { type: rightProp.type, description: rightProp.description, example: rightProp.example } : rightProp, depth + 1)!;
   }
 
   return {
@@ -67,7 +74,7 @@ const mergeSchema = (left?: SchemaObject, right?: SchemaObject): SchemaObject | 
     description: right.description ?? left.description,
     example: right.example ?? left.example,
     required: [...new Set([...(left.required ?? []), ...(right.required ?? [])])],
-    items: mergeSchema(left.items, right.items),
+    items: mergeSchema(left.items, right.items, depth + 1),
     properties
   };
 };
@@ -334,7 +341,11 @@ export const canonicalizeEndpoints = (endpoints: ApiEndpoint[], files: RepoFile[
   const deduped = new Map<string, ApiEndpoint>();
 
   for (const endpoint of endpoints) {
-    const key = `${endpoint.method}:${endpoint.path}`;
+    // GraphQL operations all POST to the same /graphql path, so include the operation name in
+    // the dedupe key — otherwise every query/mutation would collapse into one endpoint.
+    const key = endpoint.source === 'graphql'
+      ? `${endpoint.method}:${endpoint.path}:${endpoint.operationId ?? ''}`
+      : `${endpoint.method}:${endpoint.path}`;
     const baseEndpoint: ApiEndpoint = {
       ...endpoint,
       sourceMetadata: endpoint.sourceMetadata ?? {

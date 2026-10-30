@@ -16,7 +16,17 @@ export interface StatusExpectation {
   /** Populated when kind === 'class'. */
   min?: number;
   max?: number;
+  /**
+   * Codes to reject even though they fall inside [min,max]. Used to keep a "route/method not
+   * found" (404/405) from counting as a successful rejection on a data-validation negative —
+   * a 404 there almost always means the path or base URL was wrong, not that the API rejected
+   * the bad input, so it should fail loudly rather than pass silently.
+   */
+  exclude?: number[];
 }
+
+// 404/405 are structural (wrong path / wrong method) rather than validation rejections.
+const ROUTE_MISS = [404, 405];
 
 export const statusExpectation = (test: GeneratedTestCase): StatusExpectation => {
   const status = test.expected.status;
@@ -26,8 +36,10 @@ export const statusExpectation = (test: GeneratedTestCase): StatusExpectation =>
   }
 
   if (test.category === 'negative' || test.category === 'security') {
-    // Any client-error response satisfies a rejection-oriented test.
-    return { kind: 'class', min: 400, max: 499 };
+    // Any client-error response satisfies a rejection-oriented test — except a structural
+    // 404/405, unless the test explicitly expects one (e.g. "GET a non-existent id").
+    const exclude = ROUTE_MISS.includes(status) ? undefined : ROUTE_MISS;
+    return { kind: 'class', min: 400, max: 499, exclude };
   }
 
   // Edge cases can be either a valid success or a boundary rejection; accept the class
@@ -43,6 +55,9 @@ export const statusSatisfied = (test: GeneratedTestCase, actual: number): boolea
   const expectation = statusExpectation(test);
   if (expectation.kind === 'exact') {
     return actual === expectation.code;
+  }
+  if (expectation.exclude?.includes(actual)) {
+    return false;
   }
   return actual >= (expectation.min ?? 0) && actual <= (expectation.max ?? 599);
 };
@@ -61,7 +76,12 @@ export const renderStatusAssertionJs = (test: GeneratedTestCase, statusExpr: str
   if (expectation.kind === 'exact') {
     return `${indent}expect(${statusExpr}).toBe(${expectation.code});`;
   }
-  return `${indent}expect(${statusExpr}).toBeGreaterThanOrEqual(${expectation.min});\n${indent}expect(${statusExpr}).toBeLessThanOrEqual(${expectation.max});`;
+  const lines = [
+    `${indent}expect(${statusExpr}).toBeGreaterThanOrEqual(${expectation.min});`,
+    `${indent}expect(${statusExpr}).toBeLessThanOrEqual(${expectation.max});`,
+    ...(expectation.exclude ?? []).map((code) => `${indent}expect(${statusExpr}).not.toBe(${code});`)
+  ];
+  return lines.join('\n');
 };
 
 /** mocha + chai assertion. */
@@ -70,7 +90,12 @@ export const renderStatusAssertionChai = (test: GeneratedTestCase, statusExpr: s
   if (expectation.kind === 'exact') {
     return `${indent}expect(${statusExpr}).to.equal(${expectation.code});`;
   }
-  return `${indent}expect(${statusExpr}).to.be.at.least(${expectation.min});\n${indent}expect(${statusExpr}).to.be.at.most(${expectation.max});`;
+  const lines = [
+    `${indent}expect(${statusExpr}).to.be.at.least(${expectation.min});`,
+    `${indent}expect(${statusExpr}).to.be.at.most(${expectation.max});`,
+    ...(expectation.exclude ?? []).map((code) => `${indent}expect(${statusExpr}).to.not.equal(${code});`)
+  ];
+  return lines.join('\n');
 };
 
 /** pytest assertion. */
@@ -79,7 +104,11 @@ export const renderStatusAssertionPy = (test: GeneratedTestCase, statusExpr: str
   if (expectation.kind === 'exact') {
     return `${indent}assert ${statusExpr} == ${expectation.code}`;
   }
-  return `${indent}assert ${expectation.min} <= ${statusExpr} <= ${expectation.max}`;
+  const lines = [`${indent}assert ${expectation.min} <= ${statusExpr} <= ${expectation.max}`];
+  for (const code of expectation.exclude ?? []) {
+    lines.push(`${indent}assert ${statusExpr} != ${code}`);
+  }
+  return lines.join('\n');
 };
 
 /**
@@ -91,7 +120,8 @@ export const renderStatusAssertionGo = (test: GeneratedTestCase, statusExpr: str
   if (expectation.kind === 'exact') {
     return `${indent}if ${statusExpr} != ${expectation.code} {\n${indent}\tt.Errorf("status = %d, want ${expectation.code}; body=%s", ${statusExpr}, ${bodyExpr})\n${indent}}`;
   }
-  return `${indent}if ${statusExpr} < ${expectation.min} || ${statusExpr} > ${expectation.max} {\n${indent}\tt.Errorf("status = %d, want ${expectation.min}-${expectation.max}; body=%s", ${statusExpr}, ${bodyExpr})\n${indent}}`;
+  const excludeCond = (expectation.exclude ?? []).map((code) => ` || ${statusExpr} == ${code}`).join('');
+  return `${indent}if ${statusExpr} < ${expectation.min} || ${statusExpr} > ${expectation.max}${excludeCond} {\n${indent}\tt.Errorf("status = %d, want ${expectation.min}-${expectation.max}; body=%s", ${statusExpr}, ${bodyExpr})\n${indent}}`;
 };
 
 /** Java / rest-assured (JUnit) assertion. `statusExpr` returns the int status code. */
@@ -100,5 +130,6 @@ export const renderStatusAssertionJava = (test: GeneratedTestCase, statusExpr: s
   if (expectation.kind === 'exact') {
     return `${indent}assertEquals(${expectation.code}, ${statusExpr}, "status mismatch; body=" + ${bodyExpr});`;
   }
-  return `${indent}assertTrue(${statusExpr} >= ${expectation.min} && ${statusExpr} <= ${expectation.max}, "status " + ${statusExpr} + " not in ${expectation.min}-${expectation.max}; body=" + ${bodyExpr});`;
+  const excludeCond = (expectation.exclude ?? []).map((code) => ` && ${statusExpr} != ${code}`).join('');
+  return `${indent}assertTrue(${statusExpr} >= ${expectation.min} && ${statusExpr} <= ${expectation.max}${excludeCond}, "status " + ${statusExpr} + " not in ${expectation.min}-${expectation.max}; body=" + ${bodyExpr});`;
 };

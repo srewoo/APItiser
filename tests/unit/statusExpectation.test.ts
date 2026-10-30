@@ -26,11 +26,19 @@ describe('statusExpectation', () => {
     expect(statusExpectationLabel(makeTest('positive', 200))).toBe('200');
   });
 
-  it('asserts the 4xx class for negative and security tests regardless of the guessed code', () => {
+  it('asserts the 4xx class (excluding structural 404/405) for negative and security tests', () => {
     for (const category of ['negative', 'security'] as const) {
       const expectation = statusExpectation(makeTest(category, 400));
-      expect(expectation).toEqual({ kind: 'class', min: 400, max: 499 });
+      expect(expectation).toEqual({ kind: 'class', min: 400, max: 499, exclude: [404, 405] });
     }
+  });
+
+  it('keeps 404/405 acceptable when the negative test explicitly expects one', () => {
+    expect(statusExpectation(makeTest('negative', 404))).toEqual({ kind: 'class', min: 400, max: 499 });
+    expect(statusSatisfied(makeTest('negative', 404), 404)).toBe(true);
+    // A data-validation negative expecting 400 must NOT pass on a wrong-path 404.
+    expect(statusSatisfied(makeTest('negative', 400), 404)).toBe(false);
+    expect(statusSatisfied(makeTest('security', 403), 405)).toBe(false);
   });
 
   it('asserts the matching class for edge tests based on the declared status', () => {
@@ -65,7 +73,9 @@ describe('statusExpectation', () => {
       expect(renderStatusAssertionChai(security, 'response.status', '  ')).toContain('to.be.at.least(400)');
 
       expect(renderStatusAssertionPy(positive, 'response.status_code', '    ')).toBe('    assert response.status_code == 200');
-      expect(renderStatusAssertionPy(security, 'response.status_code', '    ')).toBe('    assert 400 <= response.status_code <= 499');
+      expect(renderStatusAssertionPy(security, 'response.status_code', '    ')).toContain('assert 400 <= response.status_code <= 499');
+      // Structural misses are excluded for rejection-oriented tests.
+      expect(renderStatusAssertionPy(security, 'response.status_code', '    ')).toContain('response.status_code != 404');
 
       expect(renderStatusAssertionGo(security, 'resp.StatusCode', 'string(respBody)', '\t')).toContain('resp.StatusCode < 400 || resp.StatusCode > 499');
       expect(renderStatusAssertionJava(security, 'response.getStatusCode()', 'body', '\t\t')).toContain('>= 400 && response.getStatusCode() <= 499');

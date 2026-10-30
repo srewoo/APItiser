@@ -261,7 +261,8 @@ urlpatterns = [
     const detail = routes.find((r) => r.path === '/api/items/:pk/');
     expect(detail).toBeDefined();
     expect(detail?.pathParams).toEqual([{ name: 'pk', required: true, type: 'integer' }]);
-    expect(detail?.confidence).toBe(0.9);
+    // A plain urls.py entry's HTTP method is inferred (GET), so confidence is modest.
+    expect(detail?.confidence).toBe(0.55);
 
     const tag = routes.find((r) => r.path === '/api/tags/:name/');
     expect(tag?.pathParams).toEqual([{ name: 'name', required: true, type: 'string' }]);

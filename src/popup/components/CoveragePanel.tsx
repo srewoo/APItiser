@@ -17,6 +17,12 @@ const formatMs = (value?: number): string => {
   return `${(value / 1000).toFixed(1)} s`;
 };
 
+const formatTokens = (value?: number): string => {
+  if (!value && value !== 0) return '—';
+  if (value < 1000) return String(value);
+  return `${(value / 1000).toFixed(1)}k`;
+};
+
 interface CoveragePanelProps {
   activeOrLatestJob: JobState | null;
   selectedFramework?: TestFramework;
@@ -94,9 +100,19 @@ export function PerformancePanel({ latestMetric }: PerformancePanelProps) {
         </article>
       </div>
       {latestMetric ? (
-        <p className="subtle">
-          Last run: {latestMetric.status.toUpperCase()} • {latestMetric.endpointsDetected} endpoints • {latestMetric.testsGenerated} tests
-        </p>
+        <>
+          <p className="subtle">
+            Last run: {latestMetric.status.toUpperCase()} • {latestMetric.endpointsDetected} endpoints • {latestMetric.testsGenerated} tests
+          </p>
+          {latestMetric.tokensIn || latestMetric.tokensOut ? (
+            <p className="subtle">
+              Tokens: {formatTokens(latestMetric.tokensIn)} in / {formatTokens(latestMetric.tokensOut)} out
+              {typeof latestMetric.costEstimateUsd === 'number'
+                ? ` • ~$${latestMetric.costEstimateUsd.toFixed(latestMetric.costEstimateUsd < 0.01 ? 4 : 2)} (est.)`
+                : ''}
+            </p>
+          ) : null}
+        </>
       ) : (
         <p className="subtle">Run a full scan + generate cycle to capture metrics.</p>
       )}

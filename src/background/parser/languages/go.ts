@@ -1,4 +1,5 @@
 import type { RepoFile, SchemaField } from '@shared/types';
+import { maskComments } from './maskComments';
 import { joinPath, makeEvidence, normalizePath } from '../endpointBuilder';
 import type { RouteSignal } from '../routeTypes';
 
@@ -11,7 +12,7 @@ type GoRouter = 'gin' | 'chi' | 'echo' | 'mux';
  * pattern routing (`mux.HandleFunc("GET /x", h)`) can coexist with any of these
  * and is always parsed in addition to the import-indicated router.
  */
-const detectRouter = (content: string): GoRouter => {
+const detectRouter = (content: string): GoRouter | null => {
   if (/github\.com\/go-chi\/chi/.test(content)) {
     return 'chi';
   }
@@ -21,8 +22,14 @@ const detectRouter = (content: string): GoRouter => {
   if (/github\.com\/gorilla\/mux/.test(content)) {
     return 'mux';
   }
-  // gin-gonic or no recognisable import -> default to gin (preserves legacy behaviour).
-  return 'gin';
+  // Only treat a file as gin when there is real evidence — an import or a gin API usage.
+  // Previously ANY .go file defaulted to gin, so `parseUppercaseMethodRoutes` matched any
+  // `x.GET(` method call (a huge false-positive surface). Files with no router signal are
+  // skipped here; net/http pattern routing is still parsed independently below.
+  if (/github\.com\/gin-gonic\/gin/.test(content) || /\bgin\.(Default|New|Engine|Context|RouterGroup|IRoutes)\b/.test(content)) {
+    return 'gin';
+  }
+  return null;
 };
 
 /**
@@ -305,10 +312,12 @@ const dedupe = (routes: RouteSignal[]): RouteSignal[] => {
 export const parseGoRoutes = (files: RepoFile[]): RouteSignal[] => {
   const routes: RouteSignal[] = [];
 
-  for (const file of files) {
-    if (!GO_FILE_REGEX.test(file.path)) {
+  for (const rawFile of files) {
+    if (!GO_FILE_REGEX.test(rawFile.path)) {
       continue;
     }
+    // Commented-out or example registrations are not real routes.
+    const file = { ...rawFile, content: maskComments(rawFile.content, 'c') };
 
     const router = detectRouter(file.content);
     switch (router) {
@@ -322,8 +331,10 @@ export const parseGoRoutes = (files: RepoFile[]): RouteSignal[] => {
         routes.push(...parseMuxRoutes(file));
         break;
       case 'gin':
-      default:
         routes.push(...parseUppercaseMethodRoutes(file, 'gin'));
+        break;
+      default:
+        // No recognizable router in this file — parse only net/http patterns below.
         break;
     }
 

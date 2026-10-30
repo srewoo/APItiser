@@ -1,8 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AppState, RepoRef, TestCategory } from '@shared/types';
-import type { EventMessage, LocalRunnerStatus } from '@shared/messages';
+import type { AppState, RepoRef, TestCategory, ValidationResult } from '@shared/types';
+
+/** A proposed fix under review: what it changes and how to apply it if accepted. */
+interface FixReviewState {
+  kind: 'test' | 'code';
+  heading: string;
+  explanation?: string;
+  sections: FixSection[];
+  loading?: boolean;
+  applying?: boolean;
+  error?: string;
+  warning?: string;
+  apply?: () => Promise<void>;
+}
+import { RUNNER_NOT_INSTALLED, type EventMessage, type LocalRunnerStatus, type ProviderKeyStatus } from '@shared/messages';
 import { sendCommand } from './runtime';
 import { parseRepoFromUrl } from '@shared/repo';
+import { isLoopbackUrl } from '@shared/localUrl';
+import { isProviderConfigured } from '@shared/localLlm';
+import { suggestStartCommand } from '@shared/startCommand';
 import { usePopupState } from './hooks/usePopupState';
 import { SettingsModal } from './components/SettingsModal';
 import { ProgressTimeline } from './components/ProgressTimeline';
@@ -11,6 +27,11 @@ import { CoveragePanel, PerformancePanel } from './components/CoveragePanel';
 import { ActionFooter } from './components/ActionFooter';
 import { TestPreviewModal } from './components/TestPreviewModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { LiveRunPanel } from './components/LiveRunPanel';
+import { FixReviewModal, type FixSection } from './components/FixReviewModal';
+import type { PickedFolder } from './components/CodeFolder';
+import { bootRepoFor } from '@background/runner/bootTarget';
+import { ResultsPanel } from './components/ResultsPanel';
 
 const displayPlatform = (repo: RepoRef | null): string => {
   if (!repo) return 'No repository detected';
@@ -46,6 +67,7 @@ export function App() {
   const [previewOpen, setPreviewOpen] = useState<boolean>(false);
   const [runnerCheck, setRunnerCheck] = useState<{ checking: boolean; result?: LocalRunnerStatus }>({ checking: false });
   const [contextId, setContextIdLocal] = useState<string>('global');
+  const [fixReview, setFixReview] = useState<FixReviewState | null>(null);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState<string[]>([]);
   const [methodFilter, setMethodFilter] = useState<string>('ALL');
   const contextRef = useRef<string>('global');
@@ -138,11 +160,16 @@ export function App() {
   }, [mergedAppState?.settings.openApiFallbackSpec]);
 
   useEffect(() => {
-    if (!settingsOpen) return;
-    const handleEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setSettingsOpen(false); };
+    if (!settingsOpen && !previewOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      // Close the topmost modal only.
+      if (previewOpen) setPreviewOpen(false);
+      else if (settingsOpen) setSettingsOpen(false);
+    };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [settingsOpen]);
+  }, [settingsOpen, previewOpen]);
 
   useEffect(() => {
     if (!endpointIds.length) { endpointSelectionSeedRef.current = ''; setSelectedEndpointIds([]); return; }
@@ -200,8 +227,32 @@ export function App() {
     if (normalized !== current) await patchSettings({ openApiFallbackSpec: normalized });
   };
 
+  // Self-hosted GitLab lives on an arbitrary host, so its API origin is an OPTIONAL host
+  // permission (kept out of the default grant). Request it on a user gesture before we hit it.
+  const ensureGitlabHostPermission = async (target: RepoRef | null): Promise<boolean> => {
+    if (!target || target.platform !== 'gitlab') return true;
+    const base = target.gitlabBaseUrl || mergedAppState?.settings.gitlabBaseUrl || 'https://gitlab.com';
+    if (/^https:\/\/gitlab\.com/i.test(base)) return true; // covered by the default grant
+    let origin: string;
+    try {
+      origin = `${new URL(base).origin}/api/v4/*`;
+    } catch {
+      return true;
+    }
+    try {
+      if (await chrome.permissions.contains({ origins: [origin] })) return true;
+      return await chrome.permissions.request({ origins: [origin] });
+    } catch {
+      return true; // fall through; the fetch will surface a clear error if truly blocked
+    }
+  };
+
   const handleValidateAccess = async () => {
     if (!repo) { setError('Open a GitHub or GitLab repository tab first.'); return; }
+    if (!(await ensureGitlabHostPermission(repo))) {
+      setError('Permission to reach this self-hosted GitLab was declined.');
+      return;
+    }
     await persistTestFoldersIfChanged();
     setError('');
     setNotice('Validating repository access and token scopes...');
@@ -216,6 +267,10 @@ export function App() {
 
   const handleScan = async () => {
     if (!repo) { setError('Open a GitHub or GitLab repository tab before scanning.'); return; }
+    if (!(await ensureGitlabHostPermission(repo))) {
+      setError('Permission to reach this self-hosted GitLab was declined.');
+      return;
+    }
     await persistTestFoldersIfChanged();
     await persistOpenApiFallbackIfChanged();
     setError('');
@@ -314,6 +369,25 @@ export function App() {
     }
   };
 
+  const handleTestKey = async (
+    provider: AppState['settings']['provider'],
+    apiKey: string,
+    baseUrl?: string
+  ): Promise<ProviderKeyStatus> => {
+    const response = await sendCommand<EventMessage>({
+      type: 'TEST_PROVIDER_KEY',
+      payload: { provider, apiKey, baseUrl },
+      contextId
+    });
+    if (response.type === 'PROVIDER_KEY_STATUS') {
+      return response.payload;
+    }
+    if (response.type === 'JOB_ERROR') {
+      return { ok: false, message: response.error };
+    }
+    return { ok: false, message: 'Key test failed.' };
+  };
+
   const handleRunLocally = async () => {
     setNotice('Booting the local service via runLocal…');
     const response = await sendCommand<EventMessage>({ type: 'RUN_LOCALLY', contextId });
@@ -335,6 +409,117 @@ export function App() {
     }
   };
 
+  const handleStartService = async () => {
+    setError('');
+    setNotice('Starting the local service…');
+    const response = await sendCommand<EventMessage>({ type: 'START_LOCAL_SERVICE', payload: { repo: repo ?? undefined }, contextId });
+    if (response.type === 'JOB_ERROR') { setError(response.error); return; }
+    if (response.type === 'STATE_SNAPSHOT') setAppState(response.payload);
+    setNotice('Local service is running');
+  };
+
+  const handlePickFolder = async (prompt?: string): Promise<PickedFolder> => {
+    const response = await sendCommand<EventMessage>({ type: 'PICK_FOLDER', payload: { prompt }, contextId });
+    if (response.type === 'FOLDER_PICKED') return response.payload;
+    throw new Error(response.type === 'JOB_ERROR' ? response.error : 'Could not open the folder picker — type the path instead.');
+  };
+
+  const handleSaveRepoFolder = (slug: string, path: string | undefined) => {
+    const next = { ...mergedAppState?.settings.repoPaths };
+    if (path) next[slug] = path;
+    else delete next[slug];
+    void patchSettings({ repoPaths: next });
+  };
+
+  // --- reviewed fixes (test fixes now; code fixes plug in the same way) ---
+  const handleFixTest = async (result: ValidationResult) => {
+    setFixReview({ kind: 'test', heading: `Fix test: ${result.title}`, loading: true, sections: [] });
+    const response = await sendCommand<EventMessage>({
+      type: 'PROPOSE_TEST_FIX',
+      payload: { endpointId: result.endpointId, title: result.title },
+      contextId
+    });
+    if (response.type === 'TEST_FIX_PROPOSAL') {
+      const { before, after } = response.payload;
+      setFixReview({
+        kind: 'test',
+        heading: `Fix test: ${result.title}`,
+        explanation: result.verdictReason,
+        sections: [{ label: 'Test', before: JSON.stringify(before, null, 2), after: JSON.stringify(after, null, 2) }],
+        apply: async () => {
+          const applied = await sendCommand<EventMessage>({ type: 'APPLY_TEST_FIX', payload: { endpointId: result.endpointId, title: result.title, test: after }, contextId });
+          if (applied.type === 'JOB_ERROR') throw new Error(applied.error);
+          if (applied.type === 'JOB_COMPLETE') setAppState(applied.payload);
+          setNotice('Test fixed, re-run, and included in the download');
+        }
+      });
+    } else {
+      setFixReview({ kind: 'test', heading: `Fix test: ${result.title}`, sections: [], error: response.type === 'JOB_ERROR' ? response.error : 'Could not propose a fix.' });
+    }
+  };
+
+  const handleFixCode = async (result: ValidationResult) => {
+    const heading = `Fix the API: ${result.title}`;
+    setFixReview({ kind: 'code', heading, loading: true, sections: [] });
+    const response = await sendCommand<EventMessage>({
+      type: 'PROPOSE_CODE_FIX',
+      payload: { endpointId: result.endpointId, title: result.title },
+      contextId
+    });
+    if (response.type !== 'CODE_FIX_PROPOSAL') {
+      setFixReview({ kind: 'code', heading, sections: [], error: response.type === 'JOB_ERROR' ? response.error : 'Could not propose a fix.' });
+      return;
+    }
+    const proposal = response.payload;
+    setFixReview({
+      kind: 'code',
+      heading,
+      explanation: proposal.explanation,
+      sections: proposal.edits.map((item, index) => ({ label: `${item.path}${proposal.edits.length > 1 ? ` (change ${index + 1})` : ''}`, before: item.find, after: item.replace })),
+      warning: `Writes to ${[...new Set(proposal.edits.map((item) => item.path))].join(', ')} in ${proposal.root}. Originals are backed up — you can undo.`,
+      apply: async () => {
+        setNotice('Applying the fix, restarting the API and re-running the test…');
+        const applied = await sendCommand<EventMessage>({ type: 'APPLY_CODE_FIX', payload: { proposal }, contextId });
+        if (applied.type === 'JOB_ERROR') throw new Error(applied.error);
+        if (applied.type === 'JOB_COMPLETE') setAppState(applied.payload);
+        setNotice('Code fix applied — test re-run');
+      }
+    });
+  };
+
+  const handleUndoCodeFix = async () => {
+    setNotice('Restoring the original files, restarting the API…');
+    const response = await sendCommand<EventMessage>({ type: 'UNDO_CODE_FIX', contextId });
+    if (response.type === 'JOB_ERROR') { setError(response.error); return; }
+    if (response.type === 'JOB_COMPLETE') setAppState(response.payload);
+    setNotice('Code fix undone');
+  };
+
+  const acceptFix = async () => {
+    if (!fixReview?.apply) return;
+    setFixReview({ ...fixReview, applying: true, error: undefined });
+    try {
+      await fixReview.apply();
+      setFixReview(null);
+    } catch (error) {
+      setFixReview({ ...fixReview, applying: false, error: error instanceof Error ? error.message : 'Applying the fix failed.' });
+    }
+  };
+
+  const handleStopService = async () => {
+    const response = await sendCommand<EventMessage>({ type: 'STOP_LOCAL_SERVICE', contextId });
+    if (response.type === 'JOB_ERROR') { setError(response.error); return; }
+    if (response.type === 'STATE_SNAPSHOT') setAppState(response.payload);
+    setNotice('Local service stopped');
+  };
+
+  const handleRunEndpointTests = async (endpointIds?: string[]) => {
+    setError('');
+    const response = await sendCommand<EventMessage>({ type: 'RUN_ENDPOINT_TESTS', payload: { endpointIds }, contextId });
+    if (response.type === 'JOB_ERROR') { setError(response.error); return; }
+    if (response.type === 'JOB_COMPLETE') setAppState(response.payload);
+  };
+
   const handleExportSettings = () => {
     if (!mergedAppState) return;
     const {
@@ -347,11 +532,16 @@ export function App() {
       runtimeApiKey,
       runtimeCsrfToken,
       runtimeSessionCookie,
+      runtimeSecondaryApiToken,
+      runtimeSecondaryApiKey,
+      runtimeSecondarySessionCookie,
+      runtimeValues,
       runtimeSetupSteps,
       ...safe
     } = mergedAppState.settings;
     void openAiKey; void claudeKey; void geminiKey; void githubToken; void gitlabToken;
     void runtimeApiToken; void runtimeApiKey; void runtimeCsrfToken; void runtimeSessionCookie; void runtimeSetupSteps;
+    void runtimeSecondaryApiToken; void runtimeSecondaryApiKey; void runtimeSecondarySessionCookie; void runtimeValues;
     const blob = new Blob([JSON.stringify(safe, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -373,11 +563,16 @@ export function App() {
     }
   };
 
-  const openExtensionDoc = async (path: 'help.html' | 'privacypolicy.html') => {
+  const openExtensionDoc = async (path: 'help.html' | 'privacypolicy.html' | 'token-check.html') => {
     const url = chrome.runtime.getURL(path);
     await chrome.tabs.create({ url });
   };
 
+  const openSetupGuide = async () => {
+    await chrome.tabs.create({ url: chrome.runtime.getURL('onboarding.html') });
+  };
+
+  const hasProviderKey = Boolean(mergedAppState && isProviderConfigured(mergedAppState.settings));
   const busy = ['scanning', 'parsing', 'generating', 'validating', 'packaging'].includes(activeOrLatestJob?.stage ?? 'idle');
   const batchDiagnostics = activeOrLatestJob?.batchDiagnostics ?? [];
   const latestBatchDiagnostic = batchDiagnostics[batchDiagnostics.length - 1];
@@ -387,6 +582,15 @@ export function App() {
   const generatedTests = activeOrLatestJob?.generatedTests ?? [];
   const readiness = activeOrLatestJob?.readiness ?? mergedAppState?.artifacts?.[0]?.readiness;
   const readinessNotes = activeOrLatestJob?.readinessNotes ?? mergedAppState?.artifacts?.[0]?.readinessNotes ?? [];
+  const localService = mergedAppState?.localService;
+  const pageRepo = repo ?? activeOrLatestJob?.repo;
+  const repoSlug = pageRepo ? bootRepoFor(pageRepo, mergedAppState?.settings.gitlabBaseUrl).slug : undefined;
+  const runTarget = (localService?.status === 'running' ? localService.baseUrl : undefined)
+    || mergedAppState?.settings.baseUrl?.trim()
+    || undefined;
+  const endpointRunning = Boolean(activeOrLatestJob?.endpointRun);
+  const remoteBlocked = Boolean(runTarget && !isLoopbackUrl(runTarget) && !mergedAppState?.settings.allowRemoteLiveTests);
+  const runBlocked = busy || endpointRunning || !runTarget || remoteBlocked || localService?.status === 'starting';
 
   return (
     <main className="shell" data-theme="light">
@@ -407,6 +611,49 @@ export function App() {
       </header>
 
       {error ? <section className="error-banner">{error}</section> : null}
+
+      {!hasProviderKey && !settingsOpen ? (
+        <section className="empty-state setup-checklist">
+          <h2>Get set up</h2>
+          <ol className="setup-steps">
+            <li className={hasProviderKey ? 'done' : 'todo'}>
+              <span className="setup-mark">{hasProviderKey ? '✓' : '1'}</span>
+              Add an LLM provider API key
+              {hasProviderKey ? null : (
+                <>
+                  {' — '}
+                  <button type="button" className="link-btn" onClick={() => setSettingsOpen(true)}>
+                    Open Settings
+                  </button>{' '}
+                  and use <strong>Test key</strong> to confirm it.
+                </>
+              )}
+            </li>
+            <li className="done">
+              <span className="setup-mark">✓</span>
+              Pick a test framework <span className="subtle">(defaults to {mergedAppState?.settings.framework ?? 'jest'})</span>
+            </li>
+            <li className={repo ? 'done' : 'todo'}>
+              <span className="setup-mark">{repo ? '✓' : '2'}</span>
+              {repo ? 'On a repository — ready to scan.' : 'Open a GitHub or GitLab repo page.'}
+            </li>
+          </ol>
+          <p className="subtle">
+            Prefer a walkthrough?{' '}
+            <button type="button" className="link-btn" onClick={() => void openSetupGuide()}>
+              Open the setup guide
+            </button>
+          </p>
+        </section>
+      ) : !repo && !settingsOpen ? (
+        <section className="empty-state">
+          <h2>Navigate to a repository to begin</h2>
+          <p className="subtle">
+            APItiser works on a GitHub or GitLab repository page. Open a repo in this tab (e.g.{' '}
+            <code>github.com/owner/repo</code>), then reopen this panel to scan its endpoints.
+          </p>
+        </section>
+      ) : null}
 
       {settingsOpen ? (
         <ErrorBoundary
@@ -439,6 +686,8 @@ export function App() {
             onImportSettings={(file) => void handleImportSettings(file)}
             onDownloadRunner={() => void handleDownloadRunner()}
             onCheckLocalRunner={() => void handleCheckLocalRunner()}
+            onTestKey={handleTestKey}
+            onPickFolder={handlePickFolder}
             runnerCheck={runnerCheck}
           />
         </ErrorBoundary>
@@ -493,7 +742,65 @@ export function App() {
         }}
         onClearAll={() => setSelectedEndpointIds([])}
         activeOrLatestJob={activeOrLatestJob}
+        onRunEndpoint={generatedTests.length ? (id) => void handleRunEndpointTests([id]) : undefined}
+        runDisabled={runBlocked}
       />
+
+      <LiveRunPanel
+        service={localService}
+        canStart={Boolean(repo || activeOrLatestJob?.repo || mergedAppState?.settings.localRepoPath)}
+        runnerMissing={localService?.status === 'error' && localService.message === RUNNER_NOT_INSTALLED}
+        onDownloadRunner={() => void handleDownloadRunner()}
+        codeFolder={
+          repoSlug
+            ? {
+                repoSlug,
+                chosenPath: mergedAppState?.settings.repoPaths?.[repoSlug],
+                source: localService?.repoSlug === repoSlug ? localService.source : undefined,
+                onPickFolder: () => handlePickFolder(`Choose the folder that holds ${repoSlug}`),
+                onSave: (path) => handleSaveRepoFolder(repoSlug, path)
+              }
+            : undefined
+        }
+        target={runTarget}
+        allowRemote={Boolean(mergedAppState?.settings.allowRemoteLiveTests)}
+        hasTests={generatedTests.length > 0}
+        running={endpointRunning}
+        busy={busy || localService?.status === 'starting'}
+        onStartService={() => void handleStartService()}
+        onStopService={() => void handleStopService()}
+        onRunAll={() => void handleRunEndpointTests()}
+        onCancelRun={() => void handleCancel()}
+        startSuggestion={suggestStartCommand(endpoints.map((endpoint) => endpoint.source))}
+        baseUrl={mergedAppState?.settings.baseUrl ?? ''}
+        onBaseUrlChange={(url) => void patchSettings({ baseUrl: url })}
+      />
+
+      <ResultsPanel
+        summary={activeOrLatestJob?.validationSummary}
+        endpoints={endpoints}
+        running={endpointRunning}
+        onFixTest={endpointRunning ? undefined : (result) => void handleFixTest(result)}
+        onFixCode={endpointRunning ? undefined : (result) => void handleFixCode(result)}
+        codeFix={activeOrLatestJob?.codeFix}
+        onUndoCodeFix={endpointRunning ? undefined : () => void handleUndoCodeFix()}
+      />
+
+      {fixReview ? (
+        <FixReviewModal
+          heading={fixReview.heading}
+          explanation={fixReview.explanation}
+          sections={fixReview.sections}
+          loading={fixReview.loading}
+          loadingText={fixReview.kind === 'test' ? 'Asking the model for a corrected test…' : 'Reading the code and asking the model for a fix…'}
+          error={fixReview.error}
+          applying={fixReview.applying}
+          acceptLabel={fixReview.kind === 'test' ? 'Accept and re-run' : 'Apply to my code and re-run'}
+          warning={fixReview.warning}
+          onAccept={() => void acceptFix()}
+          onClose={() => setFixReview(null)}
+        />
+      ) : null}
 
       <CoveragePanel activeOrLatestJob={activeOrLatestJob} selectedFramework={mergedAppState?.settings.framework} />
       <PerformancePanel latestMetric={latestMetric} />

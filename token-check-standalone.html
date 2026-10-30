@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>API Token Checker</title>
+    <style>
+      :root { color-scheme: light; --ink:#1d272a; --muted:#647477; --paper:#fffdf7; --wash:#eef3ee; --line:#cbd8cf; --brand:#0e6875; --bad:#af3c46; --good:#167143; }
+      * { box-sizing:border-box; } body { margin:0; min-height:100vh; color:var(--ink); background:radial-gradient(circle at 0 0,#dce9df,transparent 38%),#f6f2e9; font:16px/1.45 Georgia,serif; }
+      main { width:min(100% - 32px,960px); margin:0 auto; padding:48px 0 64px; } h1,h2 { margin:0; line-height:1.1; } h1 { font-size:clamp(2.3rem,5vw,4rem); } h2 { font-size:1.35rem; } .lead { max-width:680px; color:var(--muted); margin:14px 0 28px; font-family:system-ui,sans-serif; }
+      .notice { border-left:4px solid var(--brand); background:#e7f1ef; padding:13px 16px; margin-bottom:20px; color:#345154; font:14px/1.45 system-ui,sans-serif; } .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+      article { background:rgba(255,253,247,.95); border:1px solid var(--line); border-radius:16px; padding:20px; box-shadow:0 10px 28px #263c3020; } .top { display:flex; gap:12px; align-items:start; justify-content:space-between; } .hint { margin:5px 0 4px; color:var(--muted); font:13px/1.4 system-ui,sans-serif; }
+      label { display:block; margin-top:13px; color:#405154; font:600 13px system-ui,sans-serif; } input { display:block; width:100%; padding:10px 11px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); font:15px system-ui,sans-serif; margin-top:5px; } input:focus { outline:2px solid #0e687540; border-color:var(--brand); }
+      button { border:0; border-radius:8px; padding:10px 13px; margin-top:16px; color:#fff; background:var(--brand); font:700 14px system-ui,sans-serif; cursor:pointer; } button:disabled { opacity:.6; cursor:wait; } .status { margin:13px 0 0; min-height:20px; color:var(--muted); font:13px/1.4 system-ui,sans-serif; } .status.good { color:var(--good); } .status.bad { color:var(--bad); }
+      @media (max-width:650px) { main { padding-top:28px; } .grid { grid-template-columns:1fr; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>API Token Checker</h1>
+      <p class="lead">Validate OpenAI, Gemini, Anthropic, GitHub, GitLab, and Jira Cloud credentials. Tokens stay in this page and are never stored.</p>
+      <p class="notice">This standalone file calls provider APIs directly from your browser. If a provider blocks browser-origin requests, use APItiser’s built-in Token Checker instead; it validates through the Chrome extension worker.</p>
+      <section class="grid" id="checks"></section>
+    </main>
+    <script>
+      const services = [
+        { id:'openai', name:'OpenAI', hint:'Checks the Models API.', url:'https://api.openai.com/v1/models', headers:t => ({Authorization:`Bearer ${t}`}) },
+        { id:'gemini', name:'Google Gemini', hint:'Checks the Gemini Models API.', url:t => `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${encodeURIComponent(t)}`, headers:() => ({}) },
+        { id:'anthropic', name:'Anthropic Claude', hint:'Checks the Anthropic Models API.', url:'https://api.anthropic.com/v1/models?limit=1', headers:t => ({'x-api-key':t,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'}) },
+        { id:'github', name:'GitHub', hint:'Checks your authenticated user profile.', url:'https://api.github.com/user', headers:t => ({Authorization:`Bearer ${t}`,Accept:'application/vnd.github+json'}) },
+        { id:'gitlab', name:'GitLab', hint:'Checks your authenticated user profile.', url:'https://gitlab.com/api/v4/user', headers:t => ({'PRIVATE-TOKEN':t}) },
+        { id:'atlassian', name:'Atlassian Jira Cloud', hint:'Requires Jira Cloud site URL and account email.', atlassian:true }
+      ];
+      const root = document.querySelector('#checks');
+      const escape = text => text.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      root.innerHTML = services.map(service => `<article><div class="top"><div><h2>${service.name}</h2><p class="hint">${service.hint}</p></div></div>${service.atlassian ? `<label>Jira Cloud site URL<input id="${service.id}-site" type="url" placeholder="https://your-team.atlassian.net"></label><label>Atlassian account email<input id="${service.id}-email" type="email" placeholder="you@company.com"></label>` : ''}<label>${service.atlassian ? 'API token' : 'Token / API key'}<input id="${service.id}-token" type="password" placeholder="Paste credential" autocomplete="off"></label><button id="${service.id}-button" type="button">Check token</button><p class="status" id="${service.id}-status"></p></article>`).join('');
+      const setStatus = (id, text, kind='') => { const node = document.querySelector(`#${id}-status`); node.textContent = text; node.className = `status ${kind}`; };
+      const check = async service => {
+        const token = document.querySelector(`#${service.id}-token`).value.trim();
+        const button = document.querySelector(`#${service.id}-button`);
+        if (!token) return setStatus(service.id, 'Enter a token first.', 'bad');
+        let url = service.url, headers = service.headers ? service.headers(token) : {};
+        if (service.atlassian) {
+          const site = document.querySelector('#atlassian-site').value.trim().replace(/\/+$/, '');
+          const email = document.querySelector('#atlassian-email').value.trim();
+          try { const parsed = new URL(site); if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.atlassian.net')) throw new Error(); url = `${parsed.origin}/rest/api/3/myself`; } catch { return setStatus(service.id, 'Use an HTTPS Jira Cloud URL ending in .atlassian.net.', 'bad'); }
+          if (!email) return setStatus(service.id, 'Enter your Atlassian account email.', 'bad');
+          headers = {Accept:'application/json', Authorization:`Basic ${btoa(`${email}:${token}`)}`};
+        } else if (typeof url === 'function') url = url(token);
+        button.disabled = true; button.textContent = 'Checking…'; setStatus(service.id, '');
+        try {
+          const response = await fetch(url, {headers});
+          if (response.ok) setStatus(service.id, 'Valid — service reachable.', 'good');
+          else if (response.status === 401 || response.status === 403) setStatus(service.id, `Rejected (HTTP ${response.status}). Check token and permissions.`, 'bad');
+          else if (response.status === 429) setStatus(service.id, 'Token appears valid, but the service is rate-limiting requests.', 'good');
+          else setStatus(service.id, `Service returned HTTP ${response.status}.`, 'bad');
+        } catch (error) { setStatus(service.id, `Could not validate from this browser: ${error.message}. Try APItiser's built-in Token Checker.`, 'bad'); }
+        finally { button.disabled = false; button.textContent = 'Check token'; }
+      };
+      services.forEach(service => document.querySelector(`#${service.id}-button`).addEventListener('click', () => check(service)));
+    </script>
+  </body>
+</html>

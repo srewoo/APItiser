@@ -1,6 +1,16 @@
 /// <reference lib="webworker" />
 
-import type { AppState, JobState, RepoRef, RunMetric } from '@shared/types';
+import type {
+  AppState,
+  CodeFixProposal,
+  ExtensionSettings,
+  JobState,
+  LocalServiceState,
+  RepoRef,
+  RunMetric,
+  ValidationResult,
+  ValidationSummary
+} from '@shared/types';
 import type { CommandMessage, EventMessage } from '@shared/messages';
 import { clearBadge, updateBadgeForJob } from './core/badge';
 import {
@@ -13,6 +23,8 @@ import {
   saveState,
   setActiveJob,
   setLastValidation,
+  setLocalService,
+  addArtifact,
   updateSettings
 } from './core/stateManager';
 import { emitComplete, emitError, emitProgress, emitStateSnapshot } from './core/emitter';
@@ -24,15 +36,25 @@ import { consolidateAuth } from './parser/authConsolidation';
 import { applyOpenApiFallback } from './parser/scanInput';
 import { detectExistingTestCoverage } from './parser/testCoverageDetector';
 import { scanRepositoryFiles } from './repo/scanner';
-import { validateRepoAccess } from './repo/validator';
+import { validateRepoAccess, validateRepoToken } from './repo/validator';
 import { buildCoverage } from './generation/coverage';
 import { suggestFramework } from './generation/frameworkSuggest';
 import { buildArtifactZip } from './generation/zipBuilder';
 import { assessReadiness } from './generation/readiness';
 import { assessGeneratedTestQuality } from './generation/qualityGate';
 import { buildPostmanCollection } from './generation/postmanExport';
-import { validateGeneratedTestsAgainstBaseUrl } from './generation/executionValidator';
-import { bootRepoService, pingHost, runRepoTests, runGeneratedSuite } from './runner/localRunner';
+import { buildSkippedSummary, validateGeneratedTestsAgainstBaseUrl } from './generation/executionValidator';
+import { liveSummary, mergeValidationSummary, selectTestsForEndpoints } from './generation/endpointRun';
+import { hasRepairableFailures } from './generation/failureTriage';
+import { applyTestFix, proposeTestFix } from './fixes/testFix';
+import { proposeCodeFix } from './fixes/codeFix';
+import { getRunningService, staleServiceState, startLocalService, stopLocalService } from './runner/localSession';
+import { apiDirHint, bootRepoFor } from './runner/bootTarget';
+import { isLoopbackUrl } from '@shared/localUrl';
+import { LOCAL_LLM_KEY, providerKeyFor } from '@shared/localLlm';
+import { modelListRequest, parseModelList } from './llm/modelList';
+import { estimateCostUsd } from './llm/pricing';
+import { bootRepoService, hostRequest, pickFolder, pingHost, runRepoTests, runGeneratedSuite } from './runner/localRunner';
 import { suiteCommandsFor } from './runner/suiteCommands';
 import { buildRunnerZipBase64, runnerZipFileName } from './runner/runnerPackage';
 import { getPlatform } from '@shared/platform';
@@ -128,42 +150,36 @@ const configureSidePanelDefaults = async (): Promise<void> => {
   }
 
   try {
-    await chrome.sidePanel.setOptions({
-      path: sidePanelPath,
-      enabled: true
-    });
-    await chrome.sidePanel.setPanelBehavior({
-      openPanelOnActionClick: true
-    });
+    // Per-tab side panel. We deliberately do NOT enable a global panel or use
+    // openPanelOnActionClick — both make Chrome open a SINGLE global panel that stays visible as
+    // the user switches tabs ("opens in all tabs"). Instead we disable the global default and
+    // open the panel ourselves, scoped to the clicked tab, in chrome.action.onClicked.
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+    await chrome.sidePanel.setOptions({ enabled: false });
   } catch (error) {
     console.warn('Side panel configuration failed:', error);
   }
 };
 
-const ensureSidePanelForTab = async (tabId: number): Promise<void> => {
+const openSidePanelForTab = (tabId: number): void => {
   if (!hasSidePanelApi()) {
     return;
   }
 
+  // chrome.sidePanel.open() MUST be invoked synchronously within the action-click gesture —
+  // any `await` before it drops the gesture and Chrome rejects the call, so nothing opens.
+  // Enable the panel for this tab and open it in the same synchronous tick (order matters:
+  // the global default is disabled, so the tab must be enabled before open resolves).
   try {
-    await chrome.sidePanel.setOptions({
-      tabId,
-      path: sidePanelPath,
-      enabled: true
-    });
+    void chrome.sidePanel.setOptions({ tabId, path: sidePanelPath, enabled: true });
   } catch (error) {
-    console.warn('Side panel tab options failed:', error);
+    console.warn('Side panel setOptions failed:', error);
   }
-};
-
-const openSidePanelForTab = async (tabId: number): Promise<void> => {
-  if (!hasSidePanelApi()) {
-    return;
-  }
-
   try {
-    await ensureSidePanelForTab(tabId);
-    await chrome.sidePanel.open({ tabId });
+    const opened = chrome.sidePanel.open({ tabId }) as Promise<void> | undefined;
+    if (opened && typeof opened.catch === 'function') {
+      opened.catch((error) => console.warn('Side panel open failed:', error));
+    }
   } catch (error) {
     console.warn('Side panel open failed:', error);
   }
@@ -220,19 +236,14 @@ const buildMetric = (
     totalMs: completedAt - job.startedAt,
     endpointsDetected: job.totalEndpoints,
     testsGenerated: job.generatedTests.length,
-    coveragePercent: job.coverage?.coveragePercent
+    coveragePercent: job.coverage?.coveragePercent,
+    tokensIn: job.tokenUsage?.inputTokens,
+    tokensOut: job.tokenUsage?.outputTokens,
+    costEstimateUsd: job.costEstimateUsd
   };
 };
 
-const requiredProviderKey = (state: AppState): string => {
-  if (state.settings.provider === 'openai') {
-    return state.settings.openAiKey ?? '';
-  }
-  if (state.settings.provider === 'claude') {
-    return state.settings.claudeKey ?? '';
-  }
-  return state.settings.geminiKey ?? '';
-};
+const requiredProviderKey = (state: AppState): string => providerKeyFor(state.settings, state.settings.provider);
 
 const resolveQueuedEndpoints = (job: JobState): JobState['endpoints'] => {
   if (!job.queuedEndpointIds?.length) {
@@ -452,15 +463,27 @@ const executeGeneration = async (
       }
 
       finalTests = generationResult.tests;
+      const costEstimateUsd = estimateCostUsd(
+        currentJob.activeProvider ?? state.settings.provider,
+        state.settings.model,
+        generationResult.tokenUsage
+      );
       finalJob = {
         ...currentJob,
         batchDiagnostics: mergedDiagnostics,
-        qualityStatus: generationResult.finalAssessment.passed ? 'passed' : 'partial'
+        qualityStatus: generationResult.finalAssessment.passed ? 'passed' : 'partial',
+        tokenUsage: generationResult.tokenUsage,
+        costEstimateUsd
       };
     }
 
     if (!state.settings.validateGeneratedTests || !state.settings.baseUrl || finalTests.length === 0) {
       return await finalizeGeneration(state, finalJob, finalTests, endpointsToGenerate.length, undefined, contextKey);
+    }
+    const remoteBlock = remoteTargetBlockReason(state.settings.baseUrl, state.settings);
+    if (remoteBlock) {
+      const blocked = buildSkippedSummary(finalTests, remoteBlock);
+      return await finalizeGeneration(state, { ...finalJob, validationSummary: blocked }, finalTests, endpointsToGenerate.length, blocked, contextKey);
     }
 
     let validatedTests = finalTests;
@@ -472,7 +495,8 @@ const executeGeneration = async (
     );
 
     for (let round = 0; round < (state.settings.maxValidationRepairs ?? 0); round += 1) {
-      if (!state.settings.autoRepairFailingTests || validationSummary.failed === 0) {
+      // Only test-side failures are repairable; likely API bugs must stay failing.
+      if (!state.settings.autoRepairFailingTests || !hasRepairableFailures(validationSummary)) {
         break;
       }
 
@@ -763,6 +787,322 @@ const handleStartGeneration = async (
 const isRunnableHistoryJob = (job?: JobState): job is JobState =>
   Boolean(job && (job.stage === 'complete' || job.stage === 'idle'));
 
+/** Live tests mutate data and send attack payloads: loopback only unless explicitly allowed. */
+const remoteTargetBlockReason = (baseUrl: string, settings: ExtensionSettings): string | undefined =>
+  isLoopbackUrl(baseUrl) || settings.allowRemoteLiveTests
+    ? undefined
+    : `Live tests were not run against ${baseUrl}: it is not a local address, and these tests send ` +
+      'POST/PUT/DELETE and attack-style requests. Use the local service, or enable ' +
+      '"Allow live tests against non-local URLs" in Settings if this is a disposable environment.';
+
+const serviceHoldKey = 'localservice';
+// Original job per context while an on-demand run is in flight, so Cancel can restore it
+// instead of marking the whole generated suite cancelled.
+const endpointRunJobs = new Map<string, JobState>();
+
+const publishServiceState = (contextId: string) => async (service: LocalServiceState): Promise<void> => {
+  if (service.status === 'stopped' || service.status === 'error') {
+    await releaseKeepAlive(serviceHoldKey);
+  }
+  emitStateSnapshot(await setLocalService(service, contextId), contextId);
+};
+
+/**
+ * Everything the host needs to boot the repo on this page: the repo identity (so it can find the
+ * user's clone or clone it), the user's per-repo folder if they chose one, where to clone/search,
+ * and where the scanned API lives. Shared by Start and Run Locally so both pick the same folder.
+ */
+const bootOptionsFor = (state: AppState, pageRepo?: RepoRef) => {
+  const job = state.activeJob ?? state.jobHistory[0];
+  const repo = pageRepo ?? job?.repo;
+  const target = repo ? bootRepoFor(repo, state.settings.gitlabBaseUrl) : undefined;
+  // Legacy single "local repo path" still applies; the host ignores it for any other repo.
+  const repoPath = (target && state.settings.repoPaths?.[target.slug]) || state.settings.localRepoPath?.trim() || undefined;
+  if (!target && !repoPath) {
+    throw new Error('Open a GitHub or GitLab repository page, then press Start.');
+  }
+  const scannedSameRepo = Boolean(job?.repo && repo && job.repo.owner === repo.owner && job.repo.repo === repo.repo);
+  return {
+    hostName: state.settings.localRunnerHostName,
+    repoPath,
+    repo: target,
+    token: repo?.platform === 'gitlab' ? state.settings.gitlabToken : state.settings.githubToken,
+    appDirHint: scannedSameRepo && job ? apiDirHint(job.endpoints) : undefined,
+    cloneRoot: state.settings.cloneRoot?.trim() || undefined,
+    searchRoots: state.settings.cloneSearchRoots?.filter(Boolean),
+    port: state.settings.localRunPort ?? 0,
+    runLocalScriptPath: state.settings.runLocalScriptPath,
+    cmd: state.settings.localRunCmd,
+    stack: state.settings.localRunStack,
+    // Cloning + a first dependency install (e.g. a Python ML stack) routinely exceeds the old
+    // 3-minute default; honour a longer setting, never a shorter one.
+    bootTimeoutMs: Math.max(state.settings.localRunBootTimeoutMs ?? 0, 900_000)
+  };
+};
+
+/**
+ * One-click Start: no settings needed. The host finds the user's clone of the repo on this page
+ * (or clones it), boots the API folder the scan found, its databases, and the frontend.
+ */
+const handleStartLocalService = async (contextId: string, pageRepo?: RepoRef): Promise<AppState> => {
+  const state = await loadState(contextId);
+  const options = bootOptionsFor(state, pageRepo);
+  // Held for the service's lifetime; publishServiceState releases it on stop/error.
+  await acquireKeepAlive(serviceHoldKey);
+  await startLocalService(getPlatform().native, options, publishServiceState(contextId));
+  return await loadState(contextId);
+};
+
+/** Rebuild the downloadable suite after tests changed post-generation (e.g. an accepted fix). */
+const repackage = async (contextId: string): Promise<AppState> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? state.jobHistory[0];
+  if (!job?.repo || !job.generatedTests.length) return state;
+  const readinessAssessment = assessReadiness(job.generatedTests, job.validationSummary);
+  const meta = { readiness: readinessAssessment.readiness, readinessNotes: readinessAssessment.notes, validationSummary: job.validationSummary };
+  const files = renderGeneratedFiles(state.settings, job.repo, job.eligibleEndpointCount ?? job.endpoints.length, job.generatedTests, meta);
+  const artifact = await buildArtifactZip(state.settings.framework, files, meta);
+  await addArtifact(artifact, contextId);
+  return await checkpoint({ ...job, artifactId: artifact.id, readiness: meta.readiness, readinessNotes: meta.readinessNotes, updatedAt: Date.now() }, contextId);
+};
+
+const handleProposeTestFix = async (contextId: string, endpointId: string, title: string): Promise<EventMessage> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? state.jobHistory[0];
+  if (!job) throw new Error('Scan and generate tests first.');
+  const proposal = await proposeTestFix({ settings: state.settings, job, endpointId, title });
+  return { type: 'TEST_FIX_PROPOSAL', payload: proposal, contextId } as EventMessage;
+};
+
+/** The user accepted a reviewed test fix: apply it, re-run that endpoint, rebuild the download. */
+const handleApplyTestFix = async (contextId: string, endpointId: string, title: string, test: JobState['generatedTests'][number]): Promise<AppState> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? state.jobHistory[0];
+  if (!job || !isRunnableHistoryJob(job) || job.endpointRun) throw new Error('Wait for the current run to finish.');
+  await checkpoint({ ...applyTestFix(job, endpointId, title, test), statusText: `Fixed “${test.title}”`, updatedAt: Date.now() }, contextId);
+  try {
+    await handleRunEndpointTests(contextId, [endpointId]);
+  } catch (error) {
+    // No running API to check against — keep the fix; the user can run it later.
+    const current = (await loadState(contextId)).activeJob;
+    if (current) await checkpoint({ ...current, statusText: `Fix applied — run it to check (${error instanceof Error ? error.message : 'no target'})` }, contextId);
+  }
+  return await repackage(contextId);
+};
+
+/** The repo folder on disk for code fixes: the chosen one, else where the last Start ran it. */
+const codeRootFor = (state: AppState, job: JobState): string => {
+  const slug = job.repo ? bootRepoFor(job.repo, state.settings.gitlabBaseUrl).slug : undefined;
+  const root = (slug && state.settings.repoPaths?.[slug]) || (state.localService?.repoSlug === slug ? state.localService?.source?.path : undefined);
+  if (!root) throw new Error('Press Start once so APItiser knows where this repo’s code is (or choose its folder under Run in Browser).');
+  return root;
+};
+
+const handleProposeCodeFix = async (contextId: string, endpointId: string, title: string): Promise<EventMessage> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? state.jobHistory[0];
+  if (!job) throw new Error('Scan and generate tests first.');
+  const hostName = state.settings.localRunnerHostName;
+  const proposal = await proposeCodeFix({
+    settings: state.settings,
+    job,
+    endpointId,
+    title,
+    root: codeRootFor(state, job),
+    readFiles: async (root, paths) =>
+      (await hostRequest(getPlatform().native, { type: 'readFiles', root, paths }, 'files', { hostName })).files
+  });
+  return { type: 'CODE_FIX_PROPOSAL', payload: proposal, contextId } as EventMessage;
+};
+
+/**
+ * After code changes: restart the API Start launched (so the change actually loads), then
+ * re-run that endpoint's tests to show whether the fix worked.
+ */
+const restartAndRerun = async (contextId: string, endpointId: string, label: string): Promise<AppState> => {
+  const managed = Boolean(getRunningService());
+  if (managed) {
+    const current = (await loadState(contextId)).activeJob;
+    if (current) await checkpoint({ ...current, statusText: `${label} — restarting the API to load it…` }, contextId);
+    await stopLocalService(publishServiceState(contextId));
+    await handleStartLocalService(contextId);
+  }
+  try {
+    await handleRunEndpointTests(contextId, [endpointId]);
+  } catch (error) {
+    const current = (await loadState(contextId)).activeJob;
+    const hint = managed ? '' : ' If your API does not reload on file changes, restart it and run again.';
+    if (current) await checkpoint({ ...current, statusText: `${label} — couldn't re-run (${error instanceof Error ? error.message : 'error'}).${hint}` }, contextId);
+  }
+  return await loadState(contextId);
+};
+
+/** The user approved the diffs: write them (host backs up originals), restart, re-run. */
+const handleApplyCodeFix = async (contextId: string, proposal: CodeFixProposal): Promise<AppState> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? state.jobHistory[0];
+  if (!job || !isRunnableHistoryJob(job) || job.endpointRun) throw new Error('Wait for the current run to finish.');
+  const applied = await hostRequest(
+    getPlatform().native,
+    { type: 'applyEdits', root: proposal.root, edits: proposal.edits, allowedPaths: proposal.files },
+    'editsApplied',
+    { hostName: state.settings.localRunnerHostName }
+  );
+  await checkpoint({
+    ...job,
+    codeFix: { backupId: applied.backupId, root: proposal.root, files: applied.files, endpointId: proposal.endpointId, title: proposal.title, explanation: proposal.explanation, appliedAt: Date.now() },
+    statusText: `Code fix applied to ${applied.files.join(', ')}`,
+    updatedAt: Date.now()
+  }, contextId);
+  return await restartAndRerun(contextId, proposal.endpointId, 'Code fix applied');
+};
+
+const handleUndoCodeFix = async (contextId: string): Promise<AppState> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? state.jobHistory[0];
+  if (!job?.codeFix) throw new Error('There is no code fix to undo.');
+  if (job.endpointRun) throw new Error('Wait for the current run to finish.');
+  await hostRequest(getPlatform().native, { type: 'restoreBackup', backupId: job.codeFix.backupId }, 'restored', { hostName: state.settings.localRunnerHostName });
+  const { endpointId } = job.codeFix;
+  await checkpoint({ ...job, codeFix: undefined, statusText: 'Code fix undone — original files restored', updatedAt: Date.now() }, contextId);
+  return await restartAndRerun(contextId, endpointId, 'Code fix undone');
+};
+
+const handlePickFolder = async (prompt: string | undefined, contextId: string): Promise<EventMessage> => {
+  const state = await loadState(contextId);
+  const picked = await pickFolder(getPlatform().native, { hostName: state.settings.localRunnerHostName, prompt });
+  return { type: 'FOLDER_PICKED', payload: picked, contextId } as EventMessage;
+};
+
+const handleStopLocalService = async (contextId: string): Promise<AppState> => {
+  await stopLocalService(publishServiceState(contextId));
+  return await loadState(contextId);
+};
+
+const API_CRASHED =
+  'The API crashed during this run — one of these requests made its process exit. An unhandled error is a bug in the API: check its log, fix it, then press Start again.';
+
+/**
+ * Requests fail within ms of a crash, but the host's "process exited" notice can land a moment
+ * later. When nothing answered at all, give it up to 2s before concluding it was never there.
+ */
+const serviceExitedDuringRun = async (summary: ValidationSummary): Promise<boolean> => {
+  const deadline = Date.now() + (summary.notRunReason ? 2000 : 0);
+  for (;;) {
+    if (!getRunningService()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+};
+
+const withCrashNote = (summary: ValidationSummary): ValidationSummary =>
+  summary.notRunReason
+    ? { ...summary, notRunReason: API_CRASHED }
+    : { ...summary, warnings: [API_CRASHED, ...(summary.warnings ?? [])] };
+
+/**
+ * Run the generated tests for the given endpoints (all when none given) against the running
+ * local service (or the configured Base URL), streaming each result into the job as it lands.
+ */
+const handleRunEndpointTests = async (contextId: string, endpointIds?: string[]): Promise<AppState> => {
+  const state = await loadState(contextId);
+  const job = state.activeJob ?? state.jobHistory[0];
+  if (!job?.generatedTests?.length) {
+    throw new Error('Generate tests first, then run them.');
+  }
+  if (!isRunnableHistoryJob(job) || job.endpointRun || localRunAbortControllers.has(contextId)) {
+    throw new Error('Wait for the current job or run to finish.');
+  }
+  const tests = selectTestsForEndpoints(job.generatedTests, endpointIds);
+  if (!tests.length) {
+    throw new Error('No generated tests for this endpoint yet — generate tests for it first.');
+  }
+  const target = getRunningService()?.baseUrl ?? state.settings.baseUrl?.trim();
+  if (!target) {
+    throw new Error('Start the local service, or set a Base URL in Settings, before running tests.');
+  }
+  const blocked = remoteTargetBlockReason(target, state.settings);
+  if (blocked) {
+    throw new Error(blocked);
+  }
+
+  const controller = new AbortController();
+  localRunAbortControllers.set(contextId, controller);
+  endpointRunJobs.set(contextId, job);
+  cancelledContexts.delete(contextId);
+  const holdKey = `endpointrun:${contextId}`;
+  await acquireKeepAlive(holdKey);
+
+  const endpoint = endpointIds?.length === 1 ? job.endpoints.find((item) => item.id === endpointIds[0]) : undefined;
+  const label = endpoint ? `${endpoint.method} ${endpoint.path}` : `${tests.length} tests`;
+  const endpointRun = { endpointIds: endpointIds ?? [], total: tests.length, startedAt: Date.now() };
+  const streamed: ValidationResult[] = [];
+
+  // Coalesced, serialized progress writes: at most one queued, and none after the run ends.
+  let runActive = true;
+  let queued = false;
+  let chain: Promise<unknown> = Promise.resolve();
+  const pushProgress = (): void => {
+    if (queued) return;
+    queued = true;
+    chain = chain
+      .then(async () => {
+        queued = false;
+        if (!runActive || controller.signal.aborted) return;
+        await checkpoint({
+          ...job,
+          endpointRun,
+          statusText: `Running ${label} against ${target} — ${streamed.length}/${tests.length}`,
+          validationSummary: liveSummary(job.validationSummary, streamed, tests, target),
+          updatedAt: Date.now()
+        }, contextId);
+      })
+      .catch(() => undefined);
+  };
+
+  // If the API Start launched dies mid-run, connection failures mean "it crashed", not
+  // "it was never there" — the latter message would send the user hunting for the wrong cause.
+  const startedManaged = Boolean(getRunningService());
+  try {
+    pushProgress();
+    const ranSummary = await validateGeneratedTestsAgainstBaseUrl(
+      { ...state.settings, baseUrl: target },
+      tests,
+      job.endpoints,
+      controller.signal,
+      (result) => {
+        streamed.push(result);
+        pushProgress();
+      }
+    );
+    runActive = false;
+    await chain;
+    if (controller.signal.aborted || isContextCancelled(contextId)) {
+      return await loadState(contextId);
+    }
+    const summary = startedManaged && (await serviceExitedDuringRun(ranSummary)) ? withCrashNote(ranSummary) : ranSummary;
+    return await checkpoint({
+      ...job,
+      endpointRun: undefined,
+      statusText: summary.notRunReason ?? `${label}: ${summary.passed}/${summary.attempted} passed`,
+      validationSummary: mergeValidationSummary(job.validationSummary, summary, tests),
+      updatedAt: Date.now()
+    }, contextId);
+  } catch (error) {
+    runActive = false;
+    await chain;
+    if (!controller.signal.aborted && !isContextCancelled(contextId)) {
+      await checkpoint({ ...job, endpointRun: undefined, statusText: `Run failed: ${error instanceof Error ? error.message : 'unknown error'}`, updatedAt: Date.now() }, contextId);
+    }
+    throw error;
+  } finally {
+    runActive = false;
+    endpointRunJobs.delete(contextId);
+    localRunAbortControllers.delete(contextId);
+    await releaseKeepAlive(holdKey);
+  }
+};
+
 /**
  * Boot the configured repo's service via the native host (runLocal), validate the already
  * generated suite against http://localhost:<port>, finalize with the live results, then tear
@@ -780,15 +1120,12 @@ const handleRunLocally = async (contextId: string): Promise<AppState> => {
   if (!state.settings.enableLocalRunner) {
     throw new Error('Local runner is disabled. Enable it in Settings and install the native host (native-host/INSTALL.md).');
   }
-  const repoPath = state.settings.localRepoPath?.trim();
-  if (!repoPath) {
-    throw new Error('Set the local repo path in Settings before running locally.');
-  }
+  // Same folder resolution as Start (per-repo folder → found clone → clone).
+  const bootOptions = bootOptionsFor(state);
   if (localRunAbortControllers.has(contextId)) {
     throw new Error('A local run is already in progress.');
   }
 
-  const port = state.settings.localRunPort ?? 8080;
   const controller = new AbortController();
   localRunAbortControllers.set(contextId, controller);
   cancelledContexts.delete(contextId);
@@ -815,15 +1152,13 @@ const handleRunLocally = async (contextId: string): Promise<AppState> => {
   let lastLogAt = 0;
 
   let handle: Awaited<ReturnType<typeof bootRepoService>> | null = null;
+  // A service started from the panel stays up: reuse it rather than booting a second copy on
+  // the same port, and leave it running afterwards.
+  const sessionHandle = getRunningService();
   try {
-    handle = await bootRepoService(getPlatform().native, {
-      hostName: state.settings.localRunnerHostName,
-      repoPath,
-      port,
-      runLocalScriptPath: state.settings.runLocalScriptPath,
-      cmd: state.settings.localRunCmd,
-      stack: state.settings.localRunStack,
-      bootTimeoutMs: state.settings.localRunBootTimeoutMs,
+    handle = sessionHandle ?? await bootRepoService(getPlatform().native, {
+      ...bootOptions,
+      withFrontend: false, // a one-shot suite run only needs the API
       onStatus: (phase, message) => pushStatus(`Local runner: ${message ?? phase}`),
       // Surface runLocal's own output (install progress, errors) so a long boot shows life
       // instead of a frozen status. Throttled to avoid a storage write per log line.
@@ -887,7 +1222,9 @@ const handleRunLocally = async (contextId: string): Promise<AppState> => {
     throw error;
   } finally {
     runActive = false;
-    handle?.stop();
+    if (handle !== sessionHandle) {
+      handle?.stop();
+    }
     await releaseKeepAlive(holdKey);
     localRunAbortControllers.delete(contextId);
   }
@@ -907,9 +1244,13 @@ const handleRunRepoTests = async (contextId: string): Promise<AppState> => {
   if (!state.settings.enableLocalRunner) {
     throw new Error('Local runner is disabled. Enable it in Settings and install the native host.');
   }
-  const repoPath = state.settings.localRepoPath?.trim();
+  // The repo's own tests run in its folder: the one chosen for this repo, else the one the
+  // last Start used for it (the host found or cloned it), else the legacy global path.
+  const target = job.repo ? bootRepoFor(job.repo, state.settings.gitlabBaseUrl) : undefined;
+  const lastStart = state.localService?.repoSlug === target?.slug ? state.localService?.source?.path : undefined;
+  const repoPath = (target && state.settings.repoPaths?.[target.slug]) || lastStart || state.settings.localRepoPath?.trim();
   if (!repoPath) {
-    throw new Error('Set the local repo path in Settings first.');
+    throw new Error("APItiser doesn't know where this repo's code is yet — press Start once (it finds or clones it), or choose the folder under Run in Browser.");
   }
   if (localRunAbortControllers.has(contextId)) {
     throw new Error('A local run is already in progress.');
@@ -936,7 +1277,8 @@ const handleRunRepoTests = async (contextId: string): Promise<AppState> => {
       hostName: state.settings.localRunnerHostName,
       repoPath,
       testCmd: state.settings.localTestCommand,
-      port: state.settings.localRunPort ?? 8080,
+      // Exported to the tests as API_BASE_URL: prefer the service actually running.
+      port: getRunningService()?.port ?? (state.settings.localRunPort || undefined),
       timeoutMs: state.settings.localRunBootTimeoutMs,
       onStatus: (_phase, message) => pushStatus(`Repo tests: ${message ?? 'running'}`),
       onLog: (line) => {
@@ -982,6 +1324,14 @@ const handleCancel = async (contextId: string): Promise<AppState> => {
     return state;
   }
 
+  const runJob = endpointRunJobs.get(contextId);
+  if (runJob) {
+    cancelledContexts.add(contextId);
+    localRunAbortControllers.get(contextId)?.abort();
+    endpointRunJobs.delete(contextId);
+    return await checkpoint({ ...runJob, endpointRun: undefined, statusText: 'Run cancelled', updatedAt: Date.now() }, contextId);
+  }
+
   cancelledContexts.add(contextId);
   generationAbortControllers.get(contextId)?.abort();
   scanAbortControllers.get(contextId)?.abort();
@@ -1014,10 +1364,13 @@ const handleCheckLocalRunner = async (contextId: string): Promise<EventMessage> 
   const state = await loadState(contextId);
   const host = await pingHost(getPlatform().native, { hostName: state.settings.localRunnerHostName });
 
-  const port = state.settings.localRunPort ?? 8080;
+  const port = state.settings.localRunPort ?? 0;
   let serviceOk = false;
-  let serviceMessage = `Nothing is listening on http://localhost:${port} yet — runLocal will start it.`;
+  let serviceMessage = port
+    ? `Nothing is listening on http://localhost:${port} yet — Start will launch it.`
+    : 'Start picks a free port for the service.';
   try {
+    if (!port) throw new Error('auto port — nothing to probe');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 2500);
     const res = await fetch(`http://localhost:${port}/`, { signal: controller.signal });
@@ -1033,6 +1386,112 @@ const handleCheckLocalRunner = async (contextId: string): Promise<EventMessage> 
     payload: { hostOk: host.ok, hostMessage: host.message, serviceOk, serviceMessage },
     contextId
   } as EventMessage;
+};
+
+/**
+ * Cheap liveness/auth check for a provider API key: hits each provider's list-models
+ * endpoint (a GET that bills nothing) and maps the HTTP status to a friendly ✓/✗. Used by
+ * the Settings "Test key" button so users see a bad key immediately rather than at generation.
+ */
+const handleTestProviderKey = async (
+  command: Extract<CommandMessage, { type: 'TEST_PROVIDER_KEY' }>,
+  contextId: string
+): Promise<EventMessage> => {
+  const { provider, apiKey, baseUrl } = command.payload;
+  // A local OpenAI-compatible server (Ollama, LM Studio) needs no key — test reachability instead.
+  const key = apiKey.trim() || (provider === 'openai' && isLoopbackUrl(baseUrl ?? '') ? LOCAL_LLM_KEY : '');
+  const result = (ok: boolean, message: string): EventMessage =>
+    ({ type: 'PROVIDER_KEY_STATUS', payload: { ok, message }, contextId }) as EventMessage;
+
+  if (!key) {
+    return result(false, 'Enter an API key first.');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const { url, headers } = modelListRequest(provider, key, baseUrl);
+    const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+    if (res.ok) {
+      const models = parseModelList(provider, await res.json().catch(() => ({})), baseUrl);
+      const found = models.length ? ` ${models.length} model${models.length === 1 ? '' : 's'} available.` : '';
+      const message = key === LOCAL_LLM_KEY ? `Local model server is reachable.${found}` : `Key is valid — provider reachable.${found}`;
+      return { type: 'PROVIDER_KEY_STATUS', payload: { ok: true, message, models }, contextId } as EventMessage;
+    }
+    if (res.status === 401 || res.status === 403) {
+      return result(
+        false,
+        key === LOCAL_LLM_KEY
+          ? `The local server refused the request (HTTP ${res.status}) — it may be configured to require an API key.`
+          : `Key rejected (HTTP ${res.status}). Check the key and its permissions.`
+      );
+    }
+    if (res.status === 429) {
+      return result(true, 'Key is valid, but you are rate-limited right now (HTTP 429).');
+    }
+    return result(false, `Provider returned HTTP ${res.status}.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'network error';
+    return result(false, `Could not reach the provider: ${message}.`);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const handleTestRepoToken = async (
+  command: Extract<CommandMessage, { type: 'TEST_REPO_TOKEN' }>,
+  contextId: string
+): Promise<EventMessage> => {
+  const { platform, token, baseUrl } = command.payload;
+  const { ok, message } = await validateRepoToken(platform, token, baseUrl);
+  return { type: 'REPO_TOKEN_STATUS', payload: { ok, message }, contextId } as EventMessage;
+};
+
+const handleTestAtlassianToken = async (
+  command: Extract<CommandMessage, { type: 'TEST_ATLASSIAN_TOKEN' }>,
+  contextId: string
+): Promise<EventMessage> => {
+  const { siteUrl, email, token } = command.payload;
+  const result = (ok: boolean, message: string): EventMessage =>
+    ({ type: 'ATLASSIAN_TOKEN_STATUS', payload: { ok, message }, contextId }) as EventMessage;
+  const trimmedSiteUrl = siteUrl.trim().replace(/\/+$/, '');
+
+  if (!trimmedSiteUrl || !email.trim() || !token.trim()) {
+    return result(false, 'Enter your Jira Cloud site URL, Atlassian account email, and API token.');
+  }
+
+  let url: URL;
+  try {
+    url = new URL(trimmedSiteUrl);
+  } catch {
+    return result(false, 'Enter a valid Jira Cloud site URL, for example https://your-team.atlassian.net.');
+  }
+
+  if (url.protocol !== 'https:' || !url.hostname.endsWith('.atlassian.net')) {
+    return result(false, 'Atlassian validation requires an HTTPS *.atlassian.net Jira Cloud site URL.');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const credentials = btoa(`${email.trim()}:${token.trim()}`);
+    const response = await fetch(`${url.origin}/rest/api/3/myself`, {
+      headers: { Accept: 'application/json', Authorization: `Basic ${credentials}` },
+      signal: controller.signal
+    });
+    if (response.ok) {
+      return result(true, 'Token is valid — Jira Cloud account reachable.');
+    }
+    if (response.status === 401 || response.status === 403) {
+      return result(false, `Token rejected (HTTP ${response.status}). Check the account email, token, and site URL.`);
+    }
+    return result(false, `Jira Cloud returned HTTP ${response.status}.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'network error';
+    return result(false, `Could not reach Jira Cloud: ${message}.`);
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 const handleDownloadRunner = async (contextId: string): Promise<EventMessage> => {
@@ -1103,6 +1562,10 @@ const autoResumeActiveJob = async (): Promise<void> => {
   autoResumeStarted = true;
 
   const allStates = await loadAllStates();
+  const staleService = staleServiceState(Object.values(allStates)[0]?.localService);
+  if (staleService) {
+    await setLocalService(staleService);
+  }
   const resumableStates = Object.values(allStates).filter((state) => Boolean(state.activeJob));
   if (!resumableStates.length) {
     return;
@@ -1111,6 +1574,11 @@ const autoResumeActiveJob = async (): Promise<void> => {
   for (const state of resumableStates) {
     const contextId = state.contextId ?? 'global';
     const job = state.activeJob!;
+
+    if (job.endpointRun) {
+      await checkpoint({ ...job, endpointRun: undefined, statusText: 'Run interrupted — the extension restarted.', updatedAt: Date.now() }, contextId);
+      continue;
+    }
 
     if (job.stage === 'generating') {
       if (generationInFlightContexts.has(contextId)) {
@@ -1254,6 +1722,57 @@ const handleMessage = (message: CommandMessage, _sender: unknown, sendResponse: 
         return;
       }
 
+      if (message.type === 'START_LOCAL_SERVICE') {
+        const next = await handleStartLocalService(contextId, message.payload?.repo);
+        sendResponse({ type: 'STATE_SNAPSHOT', payload: next, contextId } as EventMessage);
+        return;
+      }
+
+      if (message.type === 'STOP_LOCAL_SERVICE') {
+        const next = await handleStopLocalService(contextId);
+        sendResponse({ type: 'STATE_SNAPSHOT', payload: next, contextId } as EventMessage);
+        return;
+      }
+
+      if (message.type === 'PROPOSE_TEST_FIX') {
+        sendResponse(await handleProposeTestFix(contextId, message.payload.endpointId, message.payload.title));
+        return;
+      }
+
+      if (message.type === 'APPLY_TEST_FIX') {
+        const next = await handleApplyTestFix(contextId, message.payload.endpointId, message.payload.title, message.payload.test);
+        sendResponse({ type: 'JOB_COMPLETE', payload: next, contextId } as EventMessage);
+        return;
+      }
+
+      if (message.type === 'PROPOSE_CODE_FIX') {
+        sendResponse(await handleProposeCodeFix(contextId, message.payload.endpointId, message.payload.title));
+        return;
+      }
+
+      if (message.type === 'APPLY_CODE_FIX') {
+        const next = await handleApplyCodeFix(contextId, message.payload.proposal);
+        sendResponse({ type: 'JOB_COMPLETE', payload: next, contextId } as EventMessage);
+        return;
+      }
+
+      if (message.type === 'UNDO_CODE_FIX') {
+        const next = await handleUndoCodeFix(contextId);
+        sendResponse({ type: 'JOB_COMPLETE', payload: next, contextId } as EventMessage);
+        return;
+      }
+
+      if (message.type === 'PICK_FOLDER') {
+        sendResponse(await handlePickFolder(message.payload?.prompt, contextId));
+        return;
+      }
+
+      if (message.type === 'RUN_ENDPOINT_TESTS') {
+        const next = await handleRunEndpointTests(contextId, message.payload?.endpointIds);
+        sendResponse({ type: 'JOB_COMPLETE', payload: next, contextId } as EventMessage);
+        return;
+      }
+
       if (message.type === 'DOWNLOAD_RUNNER') {
         sendResponse(await handleDownloadRunner(contextId));
         return;
@@ -1261,6 +1780,21 @@ const handleMessage = (message: CommandMessage, _sender: unknown, sendResponse: 
 
       if (message.type === 'CHECK_LOCAL_RUNNER') {
         sendResponse(await handleCheckLocalRunner(contextId));
+        return;
+      }
+
+      if (message.type === 'TEST_PROVIDER_KEY') {
+        sendResponse(await handleTestProviderKey(message, contextId));
+        return;
+      }
+
+      if (message.type === 'TEST_REPO_TOKEN') {
+        sendResponse(await handleTestRepoToken(message, contextId));
+        return;
+      }
+
+      if (message.type === 'TEST_ATLASSIAN_TOKEN') {
+        sendResponse(await handleTestAtlassianToken(message, contextId));
         return;
       }
 
@@ -1278,11 +1812,20 @@ const handleMessage = (message: CommandMessage, _sender: unknown, sendResponse: 
 };
 
 export const registerListeners = (): void => {
-  chrome.runtime.onInstalled.addListener(async () => {
+  chrome.runtime.onInstalled.addListener(async (details) => {
     const state = await loadState();
     await saveState(state);
     clearBadge();
     await configureSidePanelDefaults();
+    // On a fresh install (not an update/chrome-restart), open the guided first-run wizard
+    // in a full tab, unless the user has already completed onboarding on this profile.
+    if (details.reason === 'install' && !state.settings.onboardingCompletedAt) {
+      try {
+        await chrome.tabs.create({ url: chrome.runtime.getURL('onboarding.html') });
+      } catch (error) {
+        console.warn('Onboarding tab open failed:', error);
+      }
+    }
   });
 
   chrome.runtime.onStartup.addListener(() => {
@@ -1290,19 +1833,11 @@ export const registerListeners = (): void => {
     void autoResumeActiveJob();
   });
 
+  // Open the panel only in the tab whose toolbar icon was clicked. We do NOT enable the panel on
+  // tab activation/update — doing so made it appear on every tab the user visited.
   chrome.action.onClicked.addListener((tab) => {
     if (tab.id !== undefined) {
-      void openSidePanelForTab(tab.id);
-    }
-  });
-
-  chrome.tabs.onActivated.addListener(({ tabId }) => {
-    void ensureSidePanelForTab(tabId);
-  });
-
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status === 'loading') {
-      void ensureSidePanelForTab(tabId);
+      openSidePanelForTab(tab.id);
     }
   });
 

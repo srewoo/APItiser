@@ -1,8 +1,9 @@
 {
   "name": "apitiser-extension",
-  "version": "2.3",
+  "version": "2.4",
   "private": true,
   "type": "module",
+  "description": "Generate integration tests from your API endpoints. Turn OpenAPI/Swagger specs and code into runnable API test suites.",
   "scripts": {
     "dev": "vite",
     "gen:runner": "node scripts/gen-runner-bundle.mjs",
@@ -12,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
     "benchmark": "vitest run tests/benchmarks/goldStandard.test.ts",
     "lint": "eslint src/ tests/",
     "lint:fix": "eslint src/ tests/ --fix",
@@ -30,6 +32,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@playwright/test": "^1.49.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

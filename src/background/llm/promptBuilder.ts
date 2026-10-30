@@ -282,6 +282,7 @@ export const buildRepairPrompt = (
     'Preserve good tests when possible, but remove invalid or duplicate tests.',
     'Every returned test must map to one of the provided endpoint ids.',
     'Fix unresolved :id or {id} route placeholders, invalid statuses, generic titles, and missing category coverage. Keep any {{UPPER_SNAKE_CASE}} runtime placeholders (e.g. {{USER_ID}}) intact — they are resolved at run time and must not be replaced with fabricated values.',
+    'Only fix mistakes in the TESTS (wrong payload, wrong placeholder, wrong expected 4xx code, wrong field names). NEVER change an expectation to match a server error (5xx), an accepted invalid/unauthorized request, or a response that breaks the documented contract — those are bugs in the API and the test must keep catching them.',
     `Selected categories: ${categoriesAsSentence(context.includeCategories)}`,
     `Issues: ${JSON.stringify(issues)}`,
     `Endpoints: ${JSON.stringify(batch.map(buildEndpointInput))}`,

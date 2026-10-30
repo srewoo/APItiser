@@ -25,6 +25,8 @@ export default defineConfig({
       input: {
         popup: resolve(__dirname, 'popup.html'),
         sidepanel: resolve(__dirname, 'sidepanel.html'),
+        onboarding: resolve(__dirname, 'onboarding.html'),
+        'token-check': resolve(__dirname, 'token-check.html'),
         help: resolve(__dirname, 'help.html'),
         privacypolicy: resolve(__dirname, 'privacypolicy.html'),
         'service-worker': resolve(__dirname, 'src/background/service-worker.ts')

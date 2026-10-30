@@ -13,6 +13,7 @@ import type {
   ValidationSetupStepResult,
   ValidationSummary
 } from '@shared/types';
+import { markMissingRoutes, triageFailure } from './failureTriage';
 
 interface RuntimeExecutionState {
   apiToken: string;
@@ -142,12 +143,28 @@ const buildHeaders = (
   return resolved;
 };
 
-const buildUrl = (
+/**
+ * Methods whose idempotency we verify by re-issuing the request and requiring the same result.
+ * DELETE is deliberately absent: though spec-idempotent, re-issuing destroys data again and
+ * the now-missing resource returns 404/410 — a guaranteed false failure. Exported for testing.
+ */
+export const REISSUABLE_IDEMPOTENT_METHODS = ['GET', 'PUT', 'HEAD', 'OPTIONS'];
+
+export const isReissuableForIdempotency = (method: string): boolean =>
+  REISSUABLE_IDEMPOTENT_METHODS.includes(method.toUpperCase());
+
+export const buildUrl = (
   baseUrl: string,
   path: string,
   query?: Record<string, unknown>
 ): string => {
-  const url = new URL(path, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
+  // Concatenate rather than use `new URL(path, base)` — a leading-slash path passed as the
+  // relative arg resets to the origin and silently drops a base path prefix (base
+  // `https://host/api` + `/users` → `https://host/users`). An absolute path is used as-is.
+  const isAbsolute = /^https?:\/\//i.test(path);
+  const trimmedBase = baseUrl.replace(/\/+$/, '');
+  const rel = isAbsolute ? path : `${trimmedBase}${path.startsWith('/') ? '' : '/'}${path}`;
+  const url = new URL(rel);
   for (const [key, value] of Object.entries(query ?? {})) {
     if (value !== undefined && value !== null) {
       url.searchParams.set(key, String(value));
@@ -632,7 +649,12 @@ const executeSetupSteps = async (
   return { runtimeState, warnings, results };
 };
 
-const buildSkippedSummary = (
+/** True when every result is a connection failure (no HTTP status at all). */
+export const isServerUnreachable = (results: ValidationResult[]): boolean =>
+  results.length > 0 &&
+  results.every((result) => result.status === undefined && result.failures.length > 0 && result.failures.every((failure) => failure.type === 'network'));
+
+export const buildSkippedSummary = (
   tests: GeneratedTestCase[],
   notRunReason: string,
   warnings: string[] = [],
@@ -654,11 +676,15 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
   settings: ExtensionSettings,
   tests: GeneratedTestCase[],
   endpoints: ApiEndpoint[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Called as each test finishes, for live progress. */
+  onResult?: (result: ValidationResult) => void
 ): Promise<ValidationSummary> => {
   if (!settings.baseUrl) {
     return buildSkippedSummary(tests, 'Live validation skipped because Base URL is not configured.');
   }
+  // Capture the narrowed base URL — the per-test closure below loses the outer narrowing.
+  const baseUrl = settings.baseUrl;
 
   const runtimeState = createRuntimeState(settings);
   const setupExecution = await executeSetupSteps(settings, runtimeState, signal);
@@ -683,18 +709,19 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
   }
 
   const endpointMap = new Map(endpoints.map((endpoint) => [endpoint.id, endpoint]));
-  const results: ValidationResult[] = [];
 
-  for (const test of tests) {
+  // Run one test end-to-end. Returns null when its endpoint is unknown (counted as skipped).
+  const runOne = async (test: GeneratedTestCase): Promise<ValidationResult | null> => {
     const endpoint = endpointMap.get(test.endpointId);
     if (!endpoint) {
-      continue;
+      return null;
     }
 
     const startedAt = Date.now();
     const failures: ValidationFailure[] = [];
     let status: number | undefined;
     let responseSnippet = '';
+    let sentPath = test.request.path;
 
     try {
       // Resolve {{NAME}} placeholders (e.g. {{USER_ID}}) in the path, query, and body
@@ -703,11 +730,12 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
       // fabricated id.
       const identity: RequestIdentity = test.request.identity ?? 'primary';
       const resolvedPath = resolveTemplateValue(test.request.path, runtimeState);
+      sentPath = resolvedPath;
       const resolvedQuery = resolveDeep(test.request.query ?? {}, runtimeState) as Record<string, unknown>;
       const resolvedBody = test.request.body === undefined || test.request.body === null
         ? undefined
         : resolveDeep(test.request.body, runtimeState);
-      const requestUrl = buildUrl(settings.baseUrl, resolvedPath, resolvedQuery);
+      const requestUrl = buildUrl(baseUrl, resolvedPath, resolvedQuery);
       const requestInit = {
         method: test.request.method,
         headers: {
@@ -776,7 +804,13 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
       }
 
       let parsedPayload: unknown;
-      if ((test.expected.jsonSchema || test.expected.pagination || (test.expected.contractChecks?.length ?? 0) > 0) && text) {
+      if (
+        (test.expected.jsonSchema ||
+          test.expected.pagination ||
+          (test.expected.bodyAssertions?.length ?? 0) > 0 ||
+          (test.expected.contractChecks?.length ?? 0) > 0) &&
+        text
+      ) {
         parsedPayload = safeJsonParse(text);
         if (parsedPayload === undefined) {
           failures.push({
@@ -800,7 +834,12 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
       // Real idempotency oracle: re-issue the request and require the same status and an
       // equivalent body (ignoring volatile fields). This replaces the old generated
       // `repeat.status < 500` check, which proved almost nothing.
-      if (test.expected.idempotent && ['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'].includes(test.request.method.toUpperCase())) {
+      //
+      // DELETE is deliberately excluded even though it is spec-idempotent: re-issuing it
+      // destroys real data a second time and, because the resource is already gone, the
+      // second call returns 404/410 — a guaranteed false idempotency failure. Only re-issue
+      // methods that are safe to repeat and expected to return the same status.
+      if (test.expected.idempotent && isReissuableForIdempotency(test.request.method)) {
         try {
           const repeat = await fetchWithRetry(requestUrl, requestInit, timeoutOpts, settings, signal);
           const repeatText = await repeat.text();
@@ -828,21 +867,97 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
         }
       }
     } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Unknown validation failure.';
       failures.push({
         type: 'network',
-        message: error instanceof Error ? error.message : 'Unknown validation failure.'
+        // No HTTP status means the request never got an answer — say so instead of the
+        // browser's bare "Failed to fetch".
+        message: status === undefined
+          ? `Could not connect to ${baseUrl} (${detail}) — is the API running?`
+          : detail
       });
     }
 
-    results.push({
+    const result: ValidationResult = {
       endpointId: test.endpointId,
       title: test.title,
       success: failures.length === 0,
       durationMs: Date.now() - startedAt,
       status,
       failures,
-      responseSnippet
-    });
+      responseSnippet,
+      method: test.request.method,
+      path: sentPath,
+      category: test.category
+    };
+    const triage = triageFailure(result, test);
+    return triage ? { ...result, verdict: triage.verdict, verdictReason: triage.reason } : result;
+  };
+
+  // A suite that declares resource-lifecycle ordering (create → use → teardown) MUST run
+  // serially, or a "use" request could fire before its "create". Otherwise, validate with
+  // bounded concurrency for speed. A wall-clock budget stops launching new work once exceeded.
+  const hasOrdering = tests.some(
+    (test) => test.isSetup || test.isTeardown || typeof test.order === 'number'
+  );
+  const configuredConcurrency = settings.validationConcurrency && settings.validationConcurrency > 0
+    ? settings.validationConcurrency
+    : 6;
+  const concurrency = hasOrdering ? 1 : Math.min(configuredConcurrency, Math.max(1, tests.length));
+
+  const budgetMs = settings.validationBudgetMs && settings.validationBudgetMs > 0
+    ? settings.validationBudgetMs
+    : 5 * 60 * 1000;
+  const deadline = Date.now() + budgetMs;
+
+  // Collect into an index-aligned array so results preserve input order despite concurrency.
+  const collected: Array<ValidationResult | null> = new Array(tests.length).fill(null);
+  let budgetExceeded = false;
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= tests.length) return;
+      if (signal?.aborted) return;
+      if (Date.now() > deadline) {
+        budgetExceeded = true;
+        return;
+      }
+      const result = await runOne(tests[index]);
+      collected[index] = result;
+      if (result) {
+        onResult?.(result);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  const results = markMissingRoutes(
+    collected.filter((result): result is ValidationResult => result !== null),
+    endpoints
+  );
+
+  // Every request failed to connect: the server isn't there. That's one fact, not N failing
+  // tests — report it as "not run" so nothing is marked failed and nothing is sent for repair.
+  if (!signal?.aborted && isServerUnreachable(results)) {
+    return {
+      ...buildSkippedSummary(
+        tests,
+        `Couldn't reach ${baseUrl} — nothing answered, so no tests ran. Start your API (or press Start ` +
+          'under Run in Browser), check the Base URL / port, then run again.',
+        warnings,
+        setupExecution.results
+      ),
+      targetBaseUrl: baseUrl
+    };
+  }
+
+  const skipped = Math.max(tests.length - results.length, 0);
+  if (budgetExceeded && skipped > 0) {
+    warnings.push(
+      `Validation time budget (${Math.round(budgetMs / 1000)}s) reached — ${skipped} test(s) were not run.`
+    );
   }
 
   const passed = results.filter((result) => result.success).length;
@@ -853,10 +968,11 @@ export const validateGeneratedTestsAgainstBaseUrl = async (
     passed,
     failed,
     repaired: 0,
-    skipped: Math.max(tests.length - results.length, 0),
+    skipped,
     lastValidatedAt: Date.now(),
     results,
     warnings,
-    setupSteps: setupExecution.results
+    setupSteps: setupExecution.results,
+    targetBaseUrl: baseUrl
   };
 };

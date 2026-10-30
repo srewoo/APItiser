@@ -39,7 +39,13 @@ export type EndpointSource =
   | 'chi'
   | 'echo'
   | 'mux'
-  | 'nethttp';
+  | 'nethttp'
+  | 'graphql'
+  | 'grpc'
+  | 'trpc'
+  | 'rails'
+  | 'laravel'
+  | 'symfony';
 
 export type AuthType = 'bearer' | 'apiKey' | 'cookieSession' | 'oauth2' | 'csrf' | 'none' | 'unknown';
 
@@ -309,6 +315,14 @@ export interface ExtensionSettings {
   openAiKey?: string;
   claudeKey?: string;
   geminiKey?: string;
+  /**
+   * Base URL for the OpenAI (or any OpenAI-compatible) Chat Completions API. Defaults to
+   * https://api.openai.com. Point this at a local server (Ollama, LM Studio, vLLM) or a
+   * self-hosted gateway that speaks the OpenAI protocol. The `/v1/chat/completions` path is
+   * appended automatically. Local hosts (localhost/127.0.0.1) are covered by host_permissions;
+   * arbitrary remote hosts may require adding a host permission.
+   */
+  openAiBaseUrl?: string;
   githubToken?: string;
   gitlabToken?: string;
   gitlabBaseUrl?: string;
@@ -326,6 +340,16 @@ export interface ExtensionSettings {
   autoRepairFailingTests?: boolean;
   /** Maximum validation repair rounds */
   maxValidationRepairs?: number;
+  /**
+   * Wall-clock budget (ms) for a single live-validation run. Once exceeded, no new test
+   * requests are launched and the remainder are reported as skipped. Defaults to 5 minutes.
+   */
+  validationBudgetMs?: number;
+  /**
+   * Max concurrent validation requests. Ignored (forced to 1) when the suite declares
+   * resource-lifecycle ordering (create → use → teardown), which must run serially. Default 6.
+   */
+  validationConcurrency?: number;
   /** Optional session cookie name used during live validation */
   sessionCookieName?: string;
   /** Optional CSRF header name used during live validation */
@@ -365,7 +389,7 @@ export interface ExtensionSettings {
   localRunnerHostName?: string;
   /** Absolute path to the repo on disk that the host should boot. */
   localRepoPath?: string;
-  /** Port the local service should listen on (also the validation base URL port). */
+  /** Port for the local service; 0/unset = auto (the host picks a free port). */
   localRunPort?: number;
   /** Absolute path to runLocal's run-local.sh (host falls back to its bundled copy). */
   runLocalScriptPath?: string;
@@ -376,6 +400,23 @@ export interface ExtensionSettings {
   localTestCommand?: string;
   /** Max time to allow for install + boot. Defaults to 180000ms. */
   localRunBootTimeoutMs?: number;
+  /**
+   * Live tests send mutating (POST/PUT/DELETE) and attack-style requests. They only run against
+   * loopback hosts (localhost/127.0.0.1/::1) unless this is explicitly enabled.
+   */
+  allowRemoteLiveTests?: boolean;
+  /** Per-repo folder override, keyed by repo slug ("github.com/owner/repo"). */
+  repoPaths?: Record<string, string>;
+  /** Where Start clones repos that aren't on disk yet (default ~/.apitiser/repos). */
+  cloneRoot?: string;
+  /** Extra folders Start searches for an existing clone (beyond the home folder). */
+  cloneSearchRoots?: string[];
+  /**
+   * Models discovered from each provider's list-models API, newest first. Keyed by the Provider
+   * dropdown choice ('openai', 'ollama', 'lmstudio', …), not LLMProvider: local servers ride the
+   * OpenAI adapter, and their installed models must not show up as your OpenAI account's.
+   */
+  availableModels?: Partial<Record<string, string[]>>;
   /** Optional explicit setup/login flow executed before live validation */
   runtimeSetupSteps?: RuntimeSetupStep[];
   /**
@@ -385,6 +426,12 @@ export interface ExtensionSettings {
    * environment variables so a real id can be injected without editing each test.
    */
   runtimeValues?: Record<string, string>;
+  /**
+   * Epoch ms when the user finished (or explicitly skipped) the first-run onboarding wizard.
+   * Absent/undefined means onboarding has never been completed — the service worker opens the
+   * guided flow on install, and the popup surfaces the setup checklist.
+   */
+  onboardingCompletedAt?: number;
 }
 
 export interface JobTimings {
@@ -474,6 +521,16 @@ export interface ValidationResult {
   status?: number;
   failures: ValidationFailure[];
   responseSnippet?: string;
+  /** Request as actually sent (placeholders resolved), for display. */
+  method?: string;
+  path?: string;
+  category?: TestCategory;
+  /**
+   * For failures: is the TEST wrong ('test'), likely a bug in the API ('api'), or does the API
+   * not have this route at all ('missing' — a detection problem; no test or code fix applies)?
+   */
+  verdict?: 'test' | 'api' | 'missing';
+  verdictReason?: string;
 }
 
 export interface ValidationSummary {
@@ -487,6 +544,67 @@ export interface ValidationSummary {
   warnings?: string[];
   notRunReason?: string;
   setupSteps?: ValidationSetupStepResult[];
+  /** Base URL the most recent run targeted. */
+  targetBaseUrl?: string;
+}
+
+/** One part of the stack besides the API: a database the host started or reused, the frontend… */
+export interface StackComponent {
+  name: string;
+  status: 'starting' | 'running' | 'failed' | 'stopped';
+  message?: string;
+  url?: string;
+}
+
+/** One exact, unique find/replace in a repo file (repo-relative path). */
+export interface CodeEdit {
+  path: string;
+  find: string;
+  replace: string;
+}
+
+/** A model-proposed fix for a likely API bug, awaiting the user's review. */
+export interface CodeFixProposal {
+  endpointId: string;
+  title: string;
+  /** Repo root on disk the edits apply to. */
+  root: string;
+  explanation: string;
+  edits: CodeEdit[];
+  /** Files shown to the model — the only ones edits may touch. */
+  files: string[];
+}
+
+/** A code fix the user accepted; its backup allows Undo. */
+export interface AppliedCodeFix {
+  backupId: string;
+  root: string;
+  files: string[];
+  endpointId: string;
+  title: string;
+  explanation: string;
+  appliedAt: number;
+}
+
+/** Which folder Start booted, and how it was found. */
+export interface CodeSource {
+  path: string;
+  /** chosen = the user's folder for this repo; found = an existing clone; cloned/managed = cloned by APItiser. */
+  kind: 'chosen' | 'found' | 'cloned' | 'managed';
+}
+
+/** The long-lived local service booted via the native host (one at a time, extension-wide). */
+export interface LocalServiceState {
+  status: 'starting' | 'running' | 'stopped' | 'error';
+  port?: number;
+  baseUrl?: string;
+  message?: string;
+  /** Databases / frontend brought up (or reused) alongside the API. */
+  components?: StackComponent[];
+  source?: CodeSource;
+  /** Slug of the repo this service was started for (source belongs to it). */
+  repoSlug?: string;
+  updatedAt: number;
 }
 
 export interface RunMetric {
@@ -503,6 +621,11 @@ export interface RunMetric {
   endpointsDetected: number;
   testsGenerated: number;
   coveragePercent?: number;
+  /** Provider token usage for the run (sum across all generation + repair calls). */
+  tokensIn?: number;
+  tokensOut?: number;
+  /** Rough USD cost estimate from a built-in per-model price table (advisory). */
+  costEstimateUsd?: number;
 }
 
 export interface JobState {
@@ -535,10 +658,17 @@ export interface JobState {
   readinessNotes?: string[];
   /** Framework suggested from the detected route sources (advisory; does not override settings). */
   suggestedFramework?: TestFramework;
+  /** Provider token usage for this run and an advisory USD cost estimate. */
+  tokenUsage?: TokenUsage;
+  costEstimateUsd?: number;
   /**
    * Result of the last LOCAL test run via the native runner — either the APItiser-generated
    * suite (`generated`) or the repo's own existing tests (`repo`). Exit code 0 = passed.
    */
+  /** The last code fix applied from the results panel (Undo restores its backup). */
+  codeFix?: AppliedCodeFix;
+  /** Set while an on-demand run (one endpoint, or all with an empty list) is in flight. */
+  endpointRun?: { endpointIds: string[]; total: number; startedAt: number };
   localTestRun?: {
     kind: 'generated' | 'repo';
     exitCode: number;
@@ -557,6 +687,7 @@ export interface AppState {
   artifacts: GeneratedArtifact[];
   metricsHistory: RunMetric[];
   lastValidation?: RepoValidationResult;
+  localService?: LocalServiceState;
 }
 
 export interface ScanResult {
@@ -564,9 +695,16 @@ export interface ScanResult {
   endpointMap: ApiEndpoint[];
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface ProviderResult {
   tests: GeneratedTestCase[];
   rawText?: string;
+  /** Token usage reported by the provider for this call, when available. */
+  usage?: TokenUsage;
 }
 
 export interface GenerateContext {
@@ -590,6 +728,8 @@ export interface LLMProviderAdapter {
 export interface ProviderOptions {
   apiKey: string;
   model: string;
+  /** Override for the provider API base URL (OpenAI-compatible servers). */
+  baseUrl?: string;
   /** Sampling temperature; omitted automatically for reasoning models by each adapter. */
   temperature?: number;
   signal?: AbortSignal;
@@ -601,6 +741,10 @@ export interface ProviderOptions {
   repairIssues?: QualityIssue[];
   currentTests?: GeneratedTestCase[];
   promptOverride?: string;
+  /** Replace the test-generation system prompt (non-test tasks, e.g. code fixes). */
+  systemOverride?: string;
+  /** Return the model's text as-is (rawText) instead of parsing it as tests. */
+  rawOutput?: boolean;
 }
 
 export interface TestFrameworkAdapter {

@@ -1,6 +1,6 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
 import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
-import { withRetry } from '@background/utils/retry';
+import { withRetry, HttpError } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
 interface ClaudeResponse {
@@ -9,6 +9,12 @@ interface ClaudeResponse {
     text?: string;
   }>;
   stop_reason?: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
 }
 
 export class ClaudeAdapter implements LLMProviderAdapter {
@@ -25,9 +31,9 @@ export class ClaudeAdapter implements LLMProviderAdapter {
       currentTests: options.currentTests,
       issues: options.repairIssues
     });
-    const systemPrompt = buildProviderSystemPrompt(this.provider, mode);
+    const systemPrompt = options.systemOverride ?? buildProviderSystemPrompt(this.provider, mode);
 
-    const text = await withRetry(
+    const { text, usage } = await withRetry(
       async () => {
         const response = await fetchWithTimeout(
           'https://api.anthropic.com/v1/messages',
@@ -41,7 +47,9 @@ export class ClaudeAdapter implements LLMProviderAdapter {
             body: JSON.stringify({
               model: options.model,
               max_tokens: computeMaxOutputTokens(batch.length),
-              system: systemPrompt,
+              // The system prompt is large and identical across every batch in a run, so mark
+              // it cacheable — Anthropic prompt caching then bills cache-read rates on repeats.
+              system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
               messages: [{ role: 'user', content: prompt }]
             })
           },
@@ -55,7 +63,7 @@ export class ClaudeAdapter implements LLMProviderAdapter {
         );
 
         if (!response.ok) {
-          throw new Error(`Claude call failed: ${response.status}`);
+          throw new HttpError(`Claude call failed: ${response.status}`, response.status);
         }
 
         const json = (await response.json()) as ClaudeResponse;
@@ -63,14 +71,22 @@ export class ClaudeAdapter implements LLMProviderAdapter {
           console.warn('[APItiser] Claude response hit max_tokens; tests may be truncated. Reduce batch size for full coverage.');
         }
         const firstText = json.content.find((item) => item.type === 'text')?.text;
-        return firstText ?? '[]';
+        const inputTokens =
+          (json.usage?.input_tokens ?? 0) +
+          (json.usage?.cache_read_input_tokens ?? 0) +
+          (json.usage?.cache_creation_input_tokens ?? 0);
+        return {
+          text: firstText ?? '[]',
+          usage: { inputTokens, outputTokens: json.usage?.output_tokens ?? 0 }
+        };
       },
       { signal: options.signal, retries: 3 }
     );
 
     return {
-      tests: parseProviderOutput(text) as ProviderResult['tests'],
-      rawText: text
+      tests: options.rawOutput ? [] : (parseProviderOutput(text) as ProviderResult['tests']),
+      rawText: text,
+      usage
     };
   }
 }

@@ -224,7 +224,22 @@ export const fetchGitHubRepoFiles = async (
 
   for (let i = 0; i < candidateFiles.length; i += CONCURRENCY) {
     const batch = candidateFiles.slice(i, i + CONCURRENCY);
-    let lastResponseHeaders: Headers | null = null;
+    // Track the most-conservative rate-limit headers across the WHOLE batch, not just
+    // whichever async response happened to write last — otherwise the limiter can overshoot
+    // by up to CONCURRENCY-1 requests before it notices `remaining` hit zero.
+    let scarcestHeaders: Headers | null = null;
+    let scarcestRemaining = Number.POSITIVE_INFINITY;
+    const noteHeaders = (h: Headers | undefined): void => {
+      if (!h || typeof h.get !== 'function') {
+        return;
+      }
+      const remainingRaw = h.get('x-ratelimit-remaining');
+      const remaining = remainingRaw === null ? Number.POSITIVE_INFINITY : Number(remainingRaw);
+      if (remaining <= scarcestRemaining) {
+        scarcestRemaining = remaining;
+        scarcestHeaders = h;
+      }
+    };
     const batchResults = await Promise.all(
       batch.map(async (item): Promise<RepoFile> => {
         const blobUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/git/blobs/${item.sha}`;
@@ -233,7 +248,7 @@ export const fetchGitHubRepoFiles = async (
           if (!response.ok) {
             throw new Error(`GitHub blob fetch failed: ${response.status}`);
           }
-          lastResponseHeaders = response.headers;
+          noteHeaders(response.headers);
           return (await response.json()) as GitHubBlobResponse;
         });
 
@@ -246,8 +261,8 @@ export const fetchGitHubRepoFiles = async (
       })
     );
     // Check rate limit after each batch and sleep if exhausted
-    if (lastResponseHeaders) {
-      await checkGitHubRateLimit(lastResponseHeaders);
+    if (scarcestHeaders) {
+      await checkGitHubRateLimit(scarcestHeaders);
     }
     files.push(...batchResults);
   }

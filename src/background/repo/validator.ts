@@ -1,6 +1,58 @@
-import type { RepoRef, RepoValidationResult } from '@shared/types';
+import type { HostPlatform, RepoRef, RepoValidationResult } from '@shared/types';
 
 const normalizeBase = (value?: string): string => (value || 'https://gitlab.com').replace(/\/$/, '');
+
+/**
+ * Repo-independent token check for the onboarding wizard. Hits the platform's authenticated
+ * "current user" endpoint (a cheap GET) so users can confirm a token before they have a repo
+ * open. Returns a friendly ✓/✗ mirroring the provider-key test.
+ */
+export const validateRepoToken = async (
+  platform: HostPlatform,
+  token: string,
+  baseUrl?: string
+): Promise<{ ok: boolean; message: string }> => {
+  const trimmed = token.trim();
+  if (!trimmed) {
+    return { ok: false, message: 'Enter a token first.' };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    let url: string;
+    let headers: Record<string, string>;
+    if (platform === 'github') {
+      url = 'https://api.github.com/user';
+      headers = { Accept: 'application/vnd.github+json', Authorization: `Bearer ${trimmed}` };
+    } else {
+      const base = normalizeBase(baseUrl);
+      try {
+        if (new URL(base).protocol !== 'https:') {
+          return { ok: false, message: 'Only HTTPS GitLab base URLs are allowed.' };
+        }
+      } catch {
+        return { ok: false, message: 'Invalid GitLab base URL format.' };
+      }
+      url = `${base}/api/v4/user`;
+      headers = { 'PRIVATE-TOKEN': trimmed };
+    }
+
+    const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+    if (res.ok) {
+      return { ok: true, message: 'Token is valid.' };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, message: `Token rejected (HTTP ${res.status}). Check the token and its scopes.` };
+    }
+    return { ok: false, message: `Request failed with HTTP ${res.status}.` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'network error';
+    return { ok: false, message: `Could not reach the host: ${message}.` };
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 const decodeStatus = (status: number): string => {
   if (status === 401 || status === 403) {

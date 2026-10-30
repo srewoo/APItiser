@@ -1,4 +1,6 @@
 import type { RepoFile, SchemaField } from '@shared/types';
+import { maskComments } from './maskComments';
+import { resolveMountPrefixes } from './pythonMounts';
 import { joinPath, makeBodySchema, makeEvidence, normalizePath } from '../endpointBuilder';
 import type { RouteSignal } from '../routeTypes';
 
@@ -215,8 +217,9 @@ const toColonPath = (rawPath: string): string =>
   normalizePath(rawPath.replace(/\{([A-Za-z0-9_]+)\}/g, ':$1'));
 
 /** Apply an owner prefix (if any) to a raw path, returning a normalised path. */
-const withPrefix = (prefixes: Map<string, string>, owner: string, rawPath: string): string => {
-  const prefix = prefixes.get(owner);
+/** `mounted` = prefix from the routers this one is included into (other files, via include_router). */
+const withPrefix = (prefixes: Map<string, string>, owner: string, rawPath: string, mounted = ''): string => {
+  const prefix = [mounted, prefixes.get(owner) ?? ''].filter(Boolean).reduce((acc, part) => joinPath(acc, part), '');
   if (prefix) {
     return joinPath(prefix, rawPath.replace(/\{([A-Za-z0-9_]+)\}/g, ':$1'));
   }
@@ -267,9 +270,12 @@ const parseDjangoRoutes = (file: RepoFile): RouteSignal[] => {
       source: 'django',
       owner: 'urlpatterns',
       file,
-      confidence: 0.9,
+      // A plain urls.py entry does not declare its HTTP method — the view decides, and can
+      // serve any verb. GET is the most common single guess, but the method is inferred, so
+      // confidence is deliberately modest (don't let a guessed verb earn a high trust score).
+      confidence: 0.55,
       pathParams: djangoPathParams(path, intParams),
-      evidence: [makeEvidence(file, 'django urls.py path entry', m.index ?? undefined)]
+      evidence: [makeEvidence(file, 'django urls.py path entry (HTTP method inferred as GET)', m.index ?? undefined)]
     });
   }
 
@@ -298,10 +304,14 @@ const parseDjangoRoutes = (file: RepoFile): RouteSignal[] => {
 export const parsePythonRoutes = (files: RepoFile[]): RouteSignal[] => {
   const routes: RouteSignal[] = [];
 
-  for (const file of files) {
-    if (!PY_FILE_REGEX.test(file.path)) {
-      continue;
-    }
+  // Docstrings/comments often show example routes ("Usage: @app.get('/admin')") — not real ones.
+  const pyFiles = files
+    .filter((file) => PY_FILE_REGEX.test(file.path))
+    .map((file) => ({ ...file, content: maskComments(file.content, 'python') }));
+  // Routers mounted into prefixed routers in other files (include_router).
+  const mounts = resolveMountPrefixes(pyFiles);
+
+  for (const file of pyFiles) {
 
     if (isDjangoFile(file)) {
       routes.push(...parseDjangoRoutes(file));
@@ -322,7 +332,7 @@ export const parsePythonRoutes = (files: RepoFile[]): RouteSignal[] => {
       const owner = match[1];
       const method = match[2].toUpperCase();
       const rawPath = match[3];
-      const path = withPrefix(prefixes, owner, rawPath);
+      const path = withPrefix(prefixes, owner, rawPath, mounts.get(`${file.path}::${owner}`));
       const decoratorEnd = (match.index ?? 0) + match[0].length;
       const args = findHandlerArgs(file.content, decoratorEnd);
       const { pathParams, queryParams, body } = modelFromSignature(
@@ -350,7 +360,7 @@ export const parsePythonRoutes = (files: RepoFile[]): RouteSignal[] => {
     )) {
       const owner = match[1];
       const rawPath = match[2];
-      const path = withPrefix(prefixes, owner, rawPath);
+      const path = withPrefix(prefixes, owner, rawPath, mounts.get(`${file.path}::${owner}`));
       const methodTokens = match[3].match(/["']([A-Za-z]+)["']/gim) ?? [];
       const methods = methodTokens
         .map((token) => token.replace(/["']/g, '').toUpperCase())

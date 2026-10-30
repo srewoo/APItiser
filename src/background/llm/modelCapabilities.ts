@@ -46,3 +46,14 @@ export const resolveTemperature = (
 /** OpenAI reasoning models cap completions via `max_completion_tokens`, not `max_tokens`. */
 export const openAiTokenField = (model: string): 'max_tokens' | 'max_completion_tokens' =>
   isOpenAiReasoningModel(model) ? 'max_completion_tokens' : 'max_tokens';
+
+/**
+ * Which parameter an OpenAI-compatible 400 error says the model rejected. Model names come
+ * from the provider's live list, so new reasoning models can appear before the patterns above
+ * know them; the adapter uses this to drop/swap the parameter and retry instead of failing.
+ */
+export const rejectedOpenAiParam = (errorText: string): 'temperature' | 'token_field' | undefined => {
+  if (/temperature/i.test(errorText)) return 'temperature';
+  if (/max_(completion_)?tokens/i.test(errorText)) return 'token_field';
+  return undefined;
+};

@@ -186,18 +186,27 @@ const resolveRef = (ref: string, rootSpec: Record<string, unknown>): Record<stri
   return typeof current === 'object' && current !== null ? (current as Record<string, unknown>) : undefined;
 };
 
-const parseSchema = (schema: unknown, rootSpec?: Record<string, unknown>): SchemaObject | undefined => {
+const parseSchema = (
+  schema: unknown,
+  rootSpec?: Record<string, unknown>,
+  seen: Set<string> = new Set()
+): SchemaObject | undefined => {
   if (!schema || typeof schema !== 'object') {
     return undefined;
   }
 
   const source = schema as Record<string, unknown>;
 
-  // Resolve $ref if present and rootSpec is provided
+  // Resolve $ref if present and rootSpec is provided. Guard against self-referential and
+  // mutually-recursive schemas (e.g. `Node.children: Node[]`, extremely common) — without a
+  // visited-set this recurses until the stack overflows.
   if (typeof source.$ref === 'string' && rootSpec) {
+    if (seen.has(source.$ref)) {
+      return { type: 'object', description: `(recursive $ref ${source.$ref})` };
+    }
     const resolved = resolveRef(source.$ref, rootSpec);
     if (resolved) {
-      return parseSchema(resolved, rootSpec);
+      return parseSchema(resolved, rootSpec, new Set([...seen, source.$ref]));
     }
     return undefined;
   }
@@ -215,15 +224,69 @@ const parseSchema = (schema: unknown, rootSpec?: Record<string, unknown>): Schem
   if (source.properties && typeof source.properties === 'object') {
     parsed.properties = {};
     for (const [key, value] of Object.entries(source.properties as Record<string, unknown>)) {
-      parsed.properties[key] = parseSchema(value, rootSpec) ?? normalizeSchemaField(key, value as Record<string, unknown>);
+      parsed.properties[key] = parseSchema(value, rootSpec, seen) ?? normalizeSchemaField(key, value as Record<string, unknown>);
     }
   }
 
   if (source.items && typeof source.items === 'object') {
-    parsed.items = parseSchema(source.items, rootSpec);
+    parsed.items = parseSchema(source.items, rootSpec, seen);
+  }
+
+  // Schema composition. `allOf` is a conjunction — merge every subschema's properties and
+  // union their required lists. `oneOf`/`anyOf` are disjunctions we can't represent as a
+  // single object, so take the first branch as a concrete representative (enough to drive
+  // test generation) and still fold in any sibling properties declared alongside.
+  const composed: SchemaObject[] = [];
+  const allOf = source.allOf;
+  if (Array.isArray(allOf)) {
+    for (const sub of allOf) {
+      const parsedSub = parseSchema(sub, rootSpec, seen);
+      if (parsedSub) composed.push(parsedSub);
+    }
+  }
+  for (const key of ['oneOf', 'anyOf'] as const) {
+    const branches = source[key];
+    if (Array.isArray(branches) && branches.length) {
+      const first = parseSchema(branches[0], rootSpec, seen);
+      if (first) composed.push(first);
+    }
+  }
+  if (composed.length) {
+    return mergeParsedSchemas([parsed, ...composed]);
   }
 
   return parsed;
+};
+
+/**
+ * Combine parsed schemas (from allOf / a representative oneOf-anyOf branch) into one object:
+ * union properties and required, prefer the first concrete non-object type, and keep the first
+ * example/description/items seen.
+ */
+const mergeParsedSchemas = (schemas: SchemaObject[]): SchemaObject => {
+  const result: SchemaObject = { type: 'object' };
+  const properties: Record<string, SchemaObject | SchemaField> = {};
+  const required = new Set<string>();
+  let sawProperties = false;
+  for (const schema of schemas) {
+    if (schema.type && schema.type !== 'object' && result.type === 'object' && !sawProperties) {
+      result.type = schema.type;
+    }
+    if (schema.properties) {
+      Object.assign(properties, schema.properties);
+      sawProperties = true;
+      result.type = 'object';
+    }
+    for (const name of schema.required ?? []) {
+      required.add(name);
+    }
+    if (schema.items && !result.items) result.items = schema.items;
+    if (schema.example !== undefined && result.example === undefined) result.example = schema.example;
+    if (schema.description && !result.description) result.description = schema.description;
+  }
+  if (Object.keys(properties).length) result.properties = properties;
+  if (required.size) result.required = [...required];
+  return result;
 };
 
 const parseDocument = (content: string, path: string): Record<string, unknown> | null => {

@@ -1,7 +1,7 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
 import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
 import { resolveTemperature } from './modelCapabilities';
-import { withRetry } from '@background/utils/retry';
+import { withRetry, HttpError } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
 interface GeminiResponse {
@@ -11,6 +11,10 @@ interface GeminiResponse {
     };
     finishReason?: string;
   }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+  };
 }
 
 export class GeminiAdapter implements LLMProviderAdapter {
@@ -27,13 +31,13 @@ export class GeminiAdapter implements LLMProviderAdapter {
       currentTests: options.currentTests,
       issues: options.repairIssues
     });
-    const systemPrompt = buildProviderSystemPrompt(this.provider, mode);
+    const systemPrompt = options.systemOverride ?? buildProviderSystemPrompt(this.provider, mode);
 
     // Gemini thinking models still accept temperature; resolveTemperature returns the
     // configured value (defaulting to 0.2) for this provider.
     const temperature = resolveTemperature(this.provider, options.model, options.temperature) ?? 0.2;
 
-    const text = await withRetry(
+    const { text, usage } = await withRetry(
       async () => {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(options.model)}:generateContent?key=${encodeURIComponent(options.apiKey)}`;
 
@@ -71,7 +75,7 @@ export class GeminiAdapter implements LLMProviderAdapter {
         );
 
         if (!response.ok) {
-          throw new Error(`Gemini call failed: ${response.status}`);
+          throw new HttpError(`Gemini call failed: ${response.status}`, response.status);
         }
 
         const json = (await response.json()) as GeminiResponse;
@@ -79,14 +83,21 @@ export class GeminiAdapter implements LLMProviderAdapter {
           console.warn('[APItiser] Gemini response hit maxOutputTokens; tests may be truncated. Reduce batch size for full coverage.');
         }
         const output = json.candidates?.[0]?.content?.parts?.[0]?.text;
-        return output ?? '[]';
+        return {
+          text: output ?? '[]',
+          usage: {
+            inputTokens: json.usageMetadata?.promptTokenCount ?? 0,
+            outputTokens: json.usageMetadata?.candidatesTokenCount ?? 0
+          }
+        };
       },
       { signal: options.signal, retries: 3 }
     );
 
     return {
-      tests: parseProviderOutput(text) as ProviderResult['tests'],
-      rawText: text
+      tests: options.rawOutput ? [] : (parseProviderOutput(text) as ProviderResult['tests']),
+      rawText: text,
+      usage
     };
   }
 }

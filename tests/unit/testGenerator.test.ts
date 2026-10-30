@@ -552,3 +552,80 @@ describe('generateTestSuite heartbeat propagation', () => {
     expect(onBatchHeartbeat).toHaveBeenCalledWith(expect.objectContaining({ phase: 'backfill', elapsedMs: 3000 }));
   });
 });
+
+describe('repairTestsFromValidation with connection failures', () => {
+  it('never asks the model to repair tests that only failed to connect', async () => {
+    generateTestsMock.mockClear();
+    const tests: GeneratedTestCase[] = [
+      { endpointId: 'GET::/users', category: 'positive', title: 'lists users', request: { method: 'GET', path: '/users' }, expected: { status: 200 } }
+    ];
+
+    const repaired = await repairTestsFromValidation({
+      settings: { ...baseSettings, openAiKey: 'sk-test' },
+      repo: { platform: 'github', owner: 'acme', repo: 'demo' },
+      endpoints: [{ id: 'GET::/users', method: 'GET', path: '/users', source: 'express', pathParams: [], queryParams: [], responses: [] }],
+      tests,
+      validationSummary: {
+        attempted: 1,
+        passed: 0,
+        failed: 1,
+        repaired: 0,
+        skipped: 0,
+        lastValidatedAt: Date.now(),
+        results: [{
+          endpointId: 'GET::/users',
+          title: 'lists users',
+          success: false,
+          durationMs: 2,
+          failures: [{ type: 'network', message: 'Could not connect to http://localhost:3000 (Failed to fetch) — is the API running?' }]
+        }]
+      }
+    });
+
+    expect(repaired).toBe(tests);
+    expect(generateTestsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('repairTestsFromValidation never repairs likely API bugs', () => {
+  it('leaves a test that caught a 500 untouched and makes no model call', async () => {
+    generateTestsMock.mockClear();
+    const tests: GeneratedTestCase[] = [
+      { endpointId: 'GET::/users', category: 'positive', title: 'lists users', request: { method: 'GET', path: '/users' }, expected: { status: 200 } }
+    ];
+    const repaired = await repairTestsFromValidation({
+      settings: { ...baseSettings, openAiKey: 'sk-test' },
+      repo: { platform: 'github', owner: 'acme', repo: 'demo' },
+      endpoints: [{ id: 'GET::/users', method: 'GET', path: '/users', source: 'express', pathParams: [], queryParams: [], responses: [] }],
+      tests,
+      validationSummary: {
+        attempted: 1, passed: 0, failed: 1, repaired: 0, skipped: 0, lastValidatedAt: Date.now(),
+        results: [{
+          endpointId: 'GET::/users', title: 'lists users', success: false, durationMs: 3, status: 500,
+          verdict: 'api', verdictReason: 'server errored',
+          failures: [{ type: 'status', message: 'Expected HTTP 200 but received 500.' }]
+        }]
+      }
+    });
+    expect(repaired).toBe(tests);
+    expect(generateTestsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('repairTestsFromValidation with an OpenAI-compatible server', () => {
+  it('sends the repair to the configured base URL (local models, gateways)', async () => {
+    generateTestsMock.mockReset();
+    generateTestsMock.mockResolvedValue({ tests: [] });
+    await repairTestsFromValidation({
+      settings: { ...baseSettings, provider: 'openai', openAiKey: '', openAiBaseUrl: 'http://localhost:11434' },
+      repo: { platform: 'github', owner: 'acme', repo: 'demo' },
+      endpoints: [{ id: 'GET::/users', method: 'GET', path: '/users', source: 'express', pathParams: [], queryParams: [], responses: [] }],
+      tests: [{ endpointId: 'GET::/users', category: 'positive', title: 'lists users', request: { method: 'GET', path: '/users' }, expected: { status: 200 } }],
+      validationSummary: {
+        attempted: 1, passed: 0, failed: 1, repaired: 0, skipped: 0, lastValidatedAt: Date.now(),
+        results: [{ endpointId: 'GET::/users', title: 'lists users', success: false, durationMs: 1, status: 404, verdict: 'test', failures: [{ type: 'status', message: 'Expected HTTP 200 but received 404.' }] }]
+      }
+    });
+    expect(generateTestsMock.mock.calls[0][2]).toMatchObject({ baseUrl: 'http://localhost:11434', promptMode: 'repair' });
+  });
+});

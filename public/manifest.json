@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "APItiser",
-  "description": "AI-powered API test generation directly in your browser.",
-  "version": "2.3",
+  "name": "APItiser - API Integration Test Gen",
+  "description": "Generate integration tests from your API endpoints. Turn OpenAPI/Swagger specs and code into runnable API test suites.",
+  "version": "2.4",
   "action": {
     "default_title": "APItiser",
     "default_icon": {
@@ -40,11 +40,14 @@
   "host_permissions": [
     "https://api.github.com/*",
     "https://gitlab.com/api/v4/*",
-    "https://*/api/v4/*",
     "https://api.openai.com/*",
     "https://api.anthropic.com/*",
     "https://generativelanguage.googleapis.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/api/v4/*",
+    "https://*.atlassian.net/*"
   ]
 }

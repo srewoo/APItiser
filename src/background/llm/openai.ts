@@ -1,8 +1,15 @@
 import type { ApiEndpoint, GenerateContext, LLMProviderAdapter, ProviderOptions, ProviderResult } from '@shared/types';
 import { buildProviderPrompt, buildProviderSystemPrompt, computeMaxOutputTokens, parseProviderOutput } from './promptBuilder';
-import { resolveTemperature, openAiTokenField } from './modelCapabilities';
-import { withRetry } from '@background/utils/retry';
+import { resolveTemperature, openAiTokenField, rejectedOpenAiParam } from './modelCapabilities';
+import { withRetry, HttpError } from '@background/utils/retry';
 import { fetchWithTimeout } from './fetchWithTimeout';
+import { DEFAULT_OPENAI_BASE_URL } from '@shared/constants';
+
+/** Join a configured base URL with the chat-completions path, tolerating a trailing slash. */
+const chatCompletionsUrl = (baseUrl: string | undefined): string => {
+  const base = (baseUrl?.trim() || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+  return `${base}/v1/chat/completions`;
+};
 
 interface OpenAiResponse {
   choices: Array<{
@@ -11,6 +18,10 @@ interface OpenAiResponse {
     };
     finish_reason?: string;
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  };
 }
 
 export class OpenAiAdapter implements LLMProviderAdapter {
@@ -27,17 +38,18 @@ export class OpenAiAdapter implements LLMProviderAdapter {
       currentTests: options.currentTests,
       issues: options.repairIssues
     });
-    const systemPrompt = buildProviderSystemPrompt(this.provider, mode);
+    const systemPrompt = options.systemOverride ?? buildProviderSystemPrompt(this.provider, mode);
 
     // Reasoning models (o-series, gpt-5 family) reject `temperature` and require
     // `max_completion_tokens`; classic models take `temperature` + `max_tokens`.
-    const temperature = resolveTemperature(this.provider, options.model, options.temperature);
-    const tokenField = openAiTokenField(options.model);
+    let temperature = resolveTemperature(this.provider, options.model, options.temperature);
+    let tokenField = openAiTokenField(options.model);
+    let tokenFieldSwapped = false;
 
-    const content = await withRetry(
+    const { content, usage } = await withRetry(
       async () => {
-        const response = await fetchWithTimeout(
-          'https://api.openai.com/v1/chat/completions',
+        const send = () => fetchWithTimeout(
+          chatCompletionsUrl(options.baseUrl),
           {
             method: 'POST',
             headers: {
@@ -70,22 +82,46 @@ export class OpenAiAdapter implements LLMProviderAdapter {
           }
         );
 
+        let response = await send();
+        // A model the patterns don't know may still reject temperature or the token-limit
+        // field: drop/swap exactly what the API names and retry, at most once per parameter.
+        while (response.status === 400) {
+          const detail = await response.text();
+          const rejected = rejectedOpenAiParam(detail);
+          if (rejected === 'temperature' && temperature !== undefined) {
+            temperature = undefined;
+          } else if (rejected === 'token_field' && !tokenFieldSwapped) {
+            tokenFieldSwapped = true;
+            tokenField = tokenField === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens';
+          } else {
+            throw new HttpError(`OpenAI call failed: 400 ${detail.slice(0, 200)}`, 400);
+          }
+          response = await send();
+        }
+
         if (!response.ok) {
-          throw new Error(`OpenAI call failed: ${response.status}`);
+          throw new HttpError(`OpenAI call failed: ${response.status}`, response.status);
         }
 
         const json = (await response.json()) as OpenAiResponse;
         if (json.choices?.[0]?.finish_reason === 'length') {
           console.warn('[APItiser] OpenAI response hit the output-token limit; tests may be truncated. Reduce batch size for full coverage.');
         }
-        return json.choices?.[0]?.message?.content ?? '';
+        return {
+          content: json.choices?.[0]?.message?.content ?? '',
+          usage: {
+            inputTokens: json.usage?.prompt_tokens ?? 0,
+            outputTokens: json.usage?.completion_tokens ?? 0
+          }
+        };
       },
       { signal: options.signal, retries: 3 }
     );
 
     return {
-      tests: parseProviderOutput(content) as ProviderResult['tests'],
-      rawText: content
+      tests: options.rawOutput ? [] : (parseProviderOutput(content) as ProviderResult['tests']),
+      rawText: content,
+      usage
     };
   }
 }

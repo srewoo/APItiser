@@ -5,7 +5,7 @@
 
 export const MAX_FILES = 1200;
 
-export const ALLOWED_EXTENSIONS = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.py', '.go', '.java'];
+export const ALLOWED_EXTENSIONS = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.py', '.go', '.java', '.graphql', '.gql', '.rb', '.php', '.proto'];
 
 export const EXCLUDED_SEGMENTS = new Set([
   'node_modules',
@@ -52,8 +52,12 @@ export const rankPath = (path: string): number => {
   if (/(^|\/)(tests?|__tests__)(\/|$)/i.test(lower)) {
     score += 10;
   }
-  if (/\.(ts|tsx|js|jsx|mjs|cjs|py|go|java)$/i.test(lower)) {
+  if (/\.(ts|tsx|js|jsx|mjs|cjs|py|go|java|rb|php|proto)$/i.test(lower)) {
     score += 10;
+  }
+  // Rails route manifests and gRPC service definitions are high-signal, single-file sources.
+  if (/(^|\/)config\/routes\.rb$/i.test(lower) || /\.proto$/i.test(lower)) {
+    score += 80;
   }
 
   return score;

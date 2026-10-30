@@ -1,4 +1,5 @@
 import type { RepoFile, SchemaField, SchemaObject } from '@shared/types';
+import { maskComments } from './maskComments';
 import { joinPath, makeBodySchema, makeEvidence, normalizePath } from '../endpointBuilder';
 import type { RouteSignal } from '../routeTypes';
 
@@ -162,13 +163,18 @@ const extractDtoBody = (content: string, dtoType: string): SchemaObject => {
   }
   const body = content.slice(openIndex + 1, endIndex);
   const fields: Array<{ name: string; type: string; required: boolean }> = [];
+  // Capture any Bean Validation annotations that precede the field so a `@NotNull`/`@NotBlank`/
+  // `@NotEmpty`/`@Positive`/`@Min`… marks the field required. Without this every DTO field was
+  // `required:false`, which silently defeated the deterministic "omit required field" negative.
   for (const fieldMatch of body.matchAll(
-    /private\s+(?:final\s+)?([A-Za-z0-9_<>,.[\]]+)\s+([A-Za-z0-9_]+)\s*[;=]/g
+    /((?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)*)private\s+(?:final\s+)?([A-Za-z0-9_<>,.[\]]+)\s+([A-Za-z0-9_]+)\s*[;=]/g
   )) {
+    const annotations = fieldMatch[1] ?? '';
+    const required = /@(NotNull|NotBlank|NotEmpty|Positive|PositiveOrZero|Min|Max|Size|Email|Pattern)\b/.test(annotations);
     fields.push({
-      name: fieldMatch[2],
-      type: javaTypeToSchema(fieldMatch[1]),
-      required: false
+      name: fieldMatch[3],
+      type: javaTypeToSchema(fieldMatch[2]),
+      required
     });
   }
   return makeBodySchema(fields) ?? { type: 'object' };
@@ -390,10 +396,12 @@ const parseJaxRs = (file: RepoFile): RouteSignal[] => {
 export const parseSpringRoutes = (files: RepoFile[]): RouteSignal[] => {
   const routes: RouteSignal[] = [];
 
-  for (const file of files) {
-    if (!JAVA_FILE_REGEX.test(file.path)) {
+  for (const rawFile of files) {
+    if (!JAVA_FILE_REGEX.test(rawFile.path)) {
       continue;
     }
+    // Javadoc examples (`@GetMapping("/x")` in a comment) are not real routes.
+    const file = { ...rawFile, content: maskComments(rawFile.content, 'c') };
     routes.push(...parseSpring(file));
     routes.push(...parseJaxRs(file));
   }

@@ -11,6 +11,7 @@
  * in-memory FakeNativePort rather than a real host.
  */
 import type { NativeMessagingAdapter } from '@shared/platform';
+import type { CodeEdit, CodeSource, StackComponent } from '@shared/types';
 
 export const DEFAULT_NATIVE_HOST = 'com.apitiser.localrunner';
 
@@ -21,14 +22,46 @@ export interface SuiteFile {
 }
 
 /** extension → host */
+/** The repo to start when there's no explicit local path: the host finds or clones it. */
+export interface BootRepo {
+  /** "host/owner/repo", e.g. "github.com/acme/api" — matched against local clones' origin. */
+  slug: string;
+  cloneUrl: string;
+  platform: 'github' | 'gitlab';
+}
+
 export type HostCommand =
-  | { type: 'boot'; repoPath: string; port: number; runLocalScriptPath?: string; cmd?: string; stack?: string; installTimeoutMs?: number }
+  | {
+      type: 'boot';
+      repoPath?: string;
+      repo?: BootRepo;
+      /** Token for cloning a private repo; sent as a one-off header, never stored. */
+      token?: string;
+      /** Repo-relative folder where the scanned API routes live. */
+      appDirHint?: string;
+      withFrontend?: boolean;
+      /** Where new clones go (default: the host's managed folder). */
+      cloneRoot?: string;
+      /** Extra folders to search for an existing clone. */
+      searchRoots?: string[];
+      port: number;
+      runLocalScriptPath?: string;
+      cmd?: string;
+      stack?: string;
+      installTimeoutMs?: number;
+    }
   | { type: 'runTests'; repoPath: string; testCmd?: string; port?: number; testTimeoutMs?: number }
   | { type: 'runSuite'; files: SuiteFile[]; installCmd?: string; testCmd: string; port?: number; dir?: string; testTimeoutMs?: number }
+  | { type: 'pickFolder'; prompt?: string }
+  | { type: 'readFiles'; root: string; paths: string[] }
+  | { type: 'applyEdits'; root: string; edits: CodeEdit[]; allowedPaths: string[] }
+  | { type: 'restoreBackup'; backupId: string }
   | { type: 'shutdown' }
   | { type: 'ping' };
 
 export type BootPhase = 'resolving' | 'installing' | 'starting' | 'waiting' | 'ready' | 'stopped' | 'testing' | 'error';
+
+export type { StackComponent, CodeSource, CodeEdit };
 
 /** host → extension */
 export type HostEvent =
@@ -36,12 +69,25 @@ export type HostEvent =
   | { type: 'log'; line: string }
   | { type: 'ready'; port: number; baseUrl: string }
   | { type: 'testsComplete'; exitCode: number; command?: string; durationMs?: number }
+  | ({ type: 'component' } & StackComponent)
+  | ({ type: 'source' } & CodeSource)
+  | { type: 'folderPicked'; path?: string; origin?: string; cancelled?: boolean }
+  | { type: 'files'; files: Array<{ path: string; content: string; truncated: boolean }> }
+  | { type: 'editsApplied'; backupId: string; files: string[] }
+  | { type: 'restored'; root: string; files: string[] }
   | { type: 'error'; message: string }
   | { type: 'pong' };
 
 export interface LocalRunOptions {
   hostName?: string;
-  repoPath: string;
+  /** Explicit folder to boot (Settings override). Without it the host resolves `repo`. */
+  repoPath?: string;
+  repo?: BootRepo;
+  token?: string;
+  appDirHint?: string;
+  withFrontend?: boolean;
+  cloneRoot?: string;
+  searchRoots?: string[];
   port: number;
   /** Absolute path to run-local.sh; the host falls back to its bundled copy when omitted. */
   runLocalScriptPath?: string;
@@ -52,6 +98,12 @@ export interface LocalRunOptions {
   bootTimeoutMs?: number;
   onStatus?: (phase: BootPhase, message?: string) => void;
   onLog?: (line: string) => void;
+  /** Fires once if the service dies AFTER it was ready (not on an explicit stop()). */
+  onExit?: (message: string) => void;
+  /** Database / frontend progress, before and after the API is ready. */
+  onComponent?: (component: StackComponent) => void;
+  /** Which folder the host is booting, and how it found it. */
+  onSource?: (source: CodeSource) => void;
 }
 
 export interface LocalRunHandle {
@@ -260,8 +312,18 @@ export const bootRepoService = (
 
     const port = native.connect(options.hostName ?? DEFAULT_NATIVE_HOST);
     let settled = false;
+    let ready = false;
+    let exited = false;
+    const exit = (message: string): void => {
+      if (!ready || exited) {
+        return;
+      }
+      exited = true;
+      options.onExit?.(message);
+    };
 
     const stop = (): void => {
+      exited = true; // an explicit stop is not an unexpected exit
       try {
         port.postMessage({ type: 'shutdown' } satisfies HostCommand);
       } catch {
@@ -280,7 +342,25 @@ export const bootRepoService = (
     }, options.bootTimeoutMs ?? 180_000);
 
     port.onMessage((raw) => {
-      if (!isHostEvent(raw) || settled) {
+      if (!isHostEvent(raw)) {
+        return;
+      }
+      if (raw.type === 'component') {
+        const { type: _type, ...rest } = raw;
+        options.onComponent?.(rest);
+        return;
+      }
+      if (raw.type === 'source') {
+        options.onSource?.({ path: raw.path, kind: raw.kind });
+        return;
+      }
+      if (settled) {
+        // After ready the host only matters if the service goes away.
+        if (raw.type === 'error') {
+          exit(raw.message || 'The local service reported an error.');
+        } else if (raw.type === 'status' && (raw.phase === 'stopped' || raw.phase === 'error')) {
+          exit(raw.message ?? `The local service ${raw.phase === 'error' ? 'failed' : 'stopped'}.`);
+        }
         return;
       }
       if (raw.type === 'log') {
@@ -293,6 +373,7 @@ export const bootRepoService = (
       }
       if (raw.type === 'ready') {
         settled = true;
+        ready = true;
         clearTimeout(timeout);
         options.onStatus?.('ready', `Service ready on port ${raw.port}`);
         resolve({ port: raw.port, baseUrl: raw.baseUrl, stop });
@@ -308,6 +389,7 @@ export const bootRepoService = (
 
     port.onDisconnect((error) => {
       if (settled) {
+        exit(error?.message ?? 'The local runner host disconnected; the service is no longer running.');
         return;
       }
       settled = true;
@@ -318,10 +400,106 @@ export const bootRepoService = (
     port.postMessage({
       type: 'boot',
       repoPath: options.repoPath,
+      repo: options.repo,
+      token: options.token,
+      appDirHint: options.appDirHint,
+      withFrontend: options.withFrontend,
+      cloneRoot: options.cloneRoot,
+      searchRoots: options.searchRoots,
       port: options.port,
       runLocalScriptPath: options.runLocalScriptPath,
       cmd: options.cmd,
       stack: options.stack,
       installTimeoutMs: options.bootTimeoutMs
     } satisfies HostCommand);
+  });
+
+export interface FolderPick {
+  path?: string;
+  /** "host/owner/repo" of the folder's git origin, when it is a clone. */
+  origin?: string;
+  cancelled?: boolean;
+}
+
+/**
+ * Show the OS's native folder dialog via the host (an extension page can't get a real path from
+ * the browser's own pickers). Resolves when the user picks or cancels; rejects if the host is
+ * missing or has no dialog available.
+ */
+export const pickFolder = (
+  native: NativeMessagingAdapter,
+  options?: { hostName?: string; prompt?: string; timeoutMs?: number }
+): Promise<FolderPick> =>
+  new Promise<FolderPick>((resolve, reject) => {
+    if (!native.isAvailable()) {
+      reject(new Error('Native messaging is unavailable.'));
+      return;
+    }
+    const port = native.connect(options?.hostName ?? DEFAULT_NATIVE_HOST);
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        port.disconnect();
+      } catch {
+        // already gone
+      }
+      action();
+    };
+    // Generous: the user is browsing folders in a dialog.
+    const timer = setTimeout(() => finish(() => resolve({ cancelled: true })), options?.timeoutMs ?? 600_000);
+    port.onMessage((raw) => {
+      if (!isHostEvent(raw)) return;
+      if (raw.type === 'folderPicked') {
+        finish(() => resolve({ path: raw.path, origin: raw.origin, cancelled: raw.cancelled }));
+      } else if (raw.type === 'error') {
+        finish(() => reject(new Error(raw.message)));
+      }
+    });
+    port.onDisconnect((error) =>
+      finish(() => reject(new Error(error?.message ?? 'The local runner disconnected before a folder was chosen.')))
+    );
+    port.postMessage({ type: 'pickFolder', prompt: options?.prompt } satisfies HostCommand);
+  });
+
+type HostEventOf<T extends HostEvent['type']> = Extract<HostEvent, { type: T }>;
+
+/**
+ * One request/one reply over a fresh host connection (the host runs it in its own process, so
+ * this works while a service is running). Rejects on a host `error` reply, disconnect or timeout.
+ */
+export const hostRequest = <T extends HostEvent['type']>(
+  native: NativeMessagingAdapter,
+  command: HostCommand,
+  expect: T,
+  options?: { hostName?: string; timeoutMs?: number }
+): Promise<HostEventOf<T>> =>
+  new Promise<HostEventOf<T>>((resolve, reject) => {
+    if (!native.isAvailable()) {
+      reject(new Error('Native messaging is unavailable.'));
+      return;
+    }
+    const port = native.connect(options?.hostName ?? DEFAULT_NATIVE_HOST);
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        port.disconnect();
+      } catch {
+        // already gone
+      }
+      action();
+    };
+    const timer = setTimeout(() => finish(() => reject(new Error('The local runner did not reply in time.'))), options?.timeoutMs ?? 30_000);
+    port.onMessage((raw) => {
+      if (!isHostEvent(raw)) return;
+      if (raw.type === expect) finish(() => resolve(raw as HostEventOf<T>));
+      else if (raw.type === 'error') finish(() => reject(new Error(raw.message)));
+    });
+    port.onDisconnect((error) => finish(() => reject(new Error(error?.message ?? 'The local runner disconnected.'))));
+    port.postMessage(command);
   });

@@ -13,21 +13,30 @@ import type {
   TabsAdapter
 } from './types';
 
-const storage = (): StorageAdapter => ({
+// The area is resolved lazily on each call (not captured) so the adapter always talks to the
+// current `chrome` global — tests swap the chrome mock between cases.
+const storageAreaAdapter = (getArea: () => chrome.storage.StorageArea): StorageAdapter => ({
   async get<T = unknown>(key: string): Promise<T | undefined> {
-    const result = await chrome.storage.local.get(key);
+    const result = await getArea().get(key);
     return result?.[key] as T | undefined;
   },
   async set(key, value): Promise<void> {
-    await chrome.storage.local.set({ [key]: value });
+    await getArea().set({ [key]: value });
   },
   async getAll(): Promise<Record<string, unknown>> {
-    return (await chrome.storage.local.get(null)) as Record<string, unknown>;
+    return (await getArea().get(null)) as Record<string, unknown>;
   },
   async remove(key): Promise<void> {
-    await chrome.storage.local.remove(key);
+    await getArea().remove(key);
   }
 });
+
+const storage = (): StorageAdapter => storageAreaAdapter(() => chrome.storage.local);
+
+// `chrome.storage.session` is memory-only (never hits disk) and cleared on browser close —
+// ideal for ephemeral secrets. Present in MV3; guard for older runtimes.
+const sessionStorage = (): StorageAdapter | undefined =>
+  chrome.storage?.session ? storageAreaAdapter(() => chrome.storage.session) : undefined;
 
 const runtime = (): RuntimeMessagingAdapter => ({
   send<TMessage, TResponse>(message: TMessage): Promise<TResponse> {
@@ -180,6 +189,7 @@ const native = (): NativeMessagingAdapter => ({
 
 export const createChromePlatform = (): Platform => ({
   storage: storage(),
+  session: sessionStorage(),
   runtime: runtime(),
   lifecycle: lifecycle(),
   downloads: downloads(),

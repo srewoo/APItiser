@@ -3,6 +3,9 @@ import type { ExtensionSettings, LLMProvider } from './types';
 export const STORAGE_KEY = 'apitiser.state.v1';
 export const HEARTBEAT_ALARM = 'apitiser.keepalive';
 
+/** Default OpenAI API base URL. Override in settings for OpenAI-compatible servers. */
+export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com';
+
 export const PROVIDER_MODELS: Record<LLMProvider, string[]> = {
   // Latest first. Entries matching the reasoning patterns in modelCapabilities.ts
   // (OpenAI o-series/gpt-5, Claude 4.x/Fable) have temperature omitted automatically.
@@ -14,6 +17,7 @@ export const PROVIDER_MODELS: Record<LLMProvider, string[]> = {
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   provider: 'openai',
   model: PROVIDER_MODELS.openai[0],
+  openAiBaseUrl: DEFAULT_OPENAI_BASE_URL,
   temperature: 0.2,
   framework: 'jest',
   includeCategories: ['positive', 'negative', 'edge'],
@@ -41,7 +45,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   enableLocalRunner: false,
   localRunnerHostName: 'com.apitiser.localrunner',
   localRepoPath: '',
-  localRunPort: 8080,
+  localRunPort: 0, // 0 = auto: the host picks a free port
   localRunBootTimeoutMs: 180_000,
   runtimeSetupSteps: []
 };

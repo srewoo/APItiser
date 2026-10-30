@@ -1358,48 +1358,68 @@ const applyMounts = (analyses: FileAnalysis[]): RouteSignal[] => {
   return known;
 };
 
-const inferAuthMetadata = (content: string): { auth: ApiEndpoint['auth']; authHints?: ApiEndpoint['authHints'] } => {
+/** Extract a window of source lines around `line` (1-based): `before` above, `after` below. */
+const lineWindow = (content: string, line: number | undefined, before: number, after: number): string => {
+  if (!line || line < 1) return '';
+  const lines = content.split(/\r?\n/);
+  const idx = line - 1;
+  return lines.slice(Math.max(0, idx - before), Math.min(lines.length, idx + after + 1)).join('\n');
+};
+
+/**
+ * Derive auth hints from a chunk of source. `scope` tunes wording/confidence:
+ *  - `route`: the text is a window around a single route (its decorators/guards + handler
+ *    body). Highest confidence — the signal is attributable to *this* endpoint.
+ *  - `global`: the whole file, used only when an app-level auth middleware is present, so the
+ *    signal legitimately applies to every route in the file. Lower confidence.
+ */
+const authHintsFromText = (
+  text: string,
+  scope: 'route' | 'global'
+): NonNullable<ApiEndpoint['authHints']> => {
   const hints: NonNullable<ApiEndpoint['authHints']> = [];
-  const lower = content.toLowerCase();
+  const lower = text.toLowerCase();
+  const where = scope === 'route' ? 'this route' : 'app-level middleware';
+  const bonus = scope === 'route' ? 0.1 : -0.05;
 
   if (/oauth|openid|passport|auth0/.test(lower)) {
     hints.push({
       type: 'oauth2',
       headerName: 'Authorization',
       setupSteps: ['Provide API_TOKEN for OAuth-protected endpoints.'],
-      confidence: 0.8,
-      evidence: 'Source code references OAuth/OpenID auth.'
+      confidence: 0.8 + bonus,
+      evidence: `OAuth/OpenID auth referenced by ${where}.`
     });
   }
 
-  if (/authorization|bearer|jwt|token|guard/.test(lower)) {
+  if (/authorization|bearer|jwt|\btoken\b|@?useguards|requireauth|authenticate/.test(lower)) {
     hints.push({
       type: hints.length ? hints[0].type : 'bearer',
       headerName: 'Authorization',
       setupSteps: ['Provide API_TOKEN for authenticated requests.'],
-      confidence: 0.72,
-      evidence: 'Source code references token/bearer auth.'
+      confidence: 0.72 + bonus,
+      evidence: `Token/bearer auth referenced by ${where}.`
     });
   }
 
-  const apiKeyHeaderMatch = content.match(/\b(X-[A-Za-z-]*API[-_]KEY|X-API-KEY|api-key)\b/i);
+  const apiKeyHeaderMatch = text.match(/\b(X-[A-Za-z-]*API[-_]KEY|X-API-KEY|api-key)\b/i);
   if (apiKeyHeaderMatch) {
     hints.push({
       type: 'apiKey',
       headerName: apiKeyHeaderMatch[1],
       setupSteps: ['Provide API_KEY for authenticated requests.'],
-      confidence: 0.78,
-      evidence: 'Source code references API key headers.'
+      confidence: 0.78 + bonus,
+      evidence: `API key header referenced by ${where}.`
     });
   }
 
-  if (/cookie|set-cookie|express-session|req\.session|session/.test(lower)) {
+  if (/set-cookie|express-session|req\.session|\bsession\b|cookie-session/.test(lower)) {
     hints.push({
       type: 'cookieSession',
       cookieName: 'session',
       setupSteps: ['Provide SESSION_COOKIE during validation when session auth is required.'],
-      confidence: 0.7,
-      evidence: 'Source code references cookies/session state.'
+      confidence: 0.7 + bonus,
+      evidence: `Cookie/session state referenced by ${where}.`
     });
   }
 
@@ -1408,14 +1428,41 @@ const inferAuthMetadata = (content: string): { auth: ApiEndpoint['auth']; authHi
       type: 'csrf',
       csrfHeaderName: 'X-CSRF-Token',
       setupSteps: ['Provide CSRF_TOKEN for mutating requests protected by CSRF middleware.'],
-      confidence: 0.68,
-      evidence: 'Source code references CSRF/XSRF protection.'
+      confidence: 0.68 + bonus,
+      evidence: `CSRF/XSRF protection referenced by ${where}.`
     });
   }
 
-  const auth = hints[0]?.type ?? 'unknown';
+  return hints;
+};
+
+// App/controller-level auth middleware that legitimately applies to every route in the file.
+const GLOBAL_AUTH_RE =
+  /\b(app|router)\.use\s*\([^)]*(auth|passport|session|csrf|jwt|bearer)/i;
+const CONTROLLER_GUARD_RE = /@UseGuards\s*\(/;
+
+/**
+ * Route-local auth attribution. Previously auth was inferred from the ENTIRE file and applied
+ * to every route in it, so any file that merely mentioned "session" tagged all its routes.
+ * Now we look at a window around the specific route (its guards/decorators + handler body)
+ * first, and only fall back to a whole-file scan when a genuine app-level auth middleware
+ * (`app.use(auth…)`, `@UseGuards`) is present — a signal that really does apply file-wide.
+ */
+const deriveRouteAuth = (signal: RouteSignal): { auth: ApiEndpoint['auth']; authHints?: ApiEndpoint['authHints'] } => {
+  const line = signal.evidence?.[0]?.line;
+  const window = line ? lineWindow(signal.file.content, line, 4, 30) : '';
+
+  let hints = window ? authHintsFromText(window, 'route') : [];
+
+  if (!hints.length) {
+    const hasGlobalAuth = GLOBAL_AUTH_RE.test(signal.file.content) || CONTROLLER_GUARD_RE.test(signal.file.content);
+    if (hasGlobalAuth) {
+      hints = authHintsFromText(signal.file.content, 'global');
+    }
+  }
+
   return {
-    auth,
+    auth: hints[0]?.type ?? 'unknown',
     authHints: hints.length ? hints : undefined
   };
 };
@@ -1429,7 +1476,7 @@ const toApiEndpoints = (signals: RouteSignal[]): ApiEndpoint[] => {
       continue;
     }
     seen.add(key);
-    const { auth, authHints } = inferAuthMetadata(signal.file.content);
+    const { auth, authHints } = deriveRouteAuth(signal);
     const authHeaders = authHints?.length
       ? Object.fromEntries(
           authHints

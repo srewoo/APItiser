@@ -1,6 +1,7 @@
 import { chunkArray } from '@background/utils/chunks';
 import { loadProviderAdapter } from '@background/llm/client';
 import { PROVIDER_MODELS } from '@shared/constants';
+import { providerKeyFor } from '@shared/localLlm';
 import { parseGeneratedTestCase } from '@shared/schemas';
 import { getFrameworkAdapter } from './frameworks/registry';
 import { synthesizeDeterministicCases } from './syntheticCases';
@@ -23,10 +24,18 @@ import type {
   ProjectMeta,
   QualityIssue,
   RepoRef,
+  TokenUsage,
   ValidationSummary
 } from '@shared/types';
 
 export { assessGeneratedTestQuality, normalizeGeneratedTests } from './qualityGate';
+
+/** Add a provider call's reported usage into a running accumulator (both optional). */
+const accumulateUsage = (sink: TokenUsage | undefined, add: TokenUsage | undefined): void => {
+  if (!sink || !add) return;
+  sink.inputTokens += add.inputTokens;
+  sink.outputTokens += add.outputTokens;
+};
 
 interface GenerateOptions {
   settings: ExtensionSettings;
@@ -64,15 +73,6 @@ export class BatchGenerationError extends Error {
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-const getProviderKey = (settings: ExtensionSettings, provider: ExtensionSettings['provider']): string => {
-  if (provider === 'openai') {
-    return settings.openAiKey ?? '';
-  }
-  if (provider === 'claude') {
-    return settings.claudeKey ?? '';
-  }
-  return settings.geminiKey ?? '';
-};
 
 /**
  * Resolve the model id to send to a given provider. The configured `settings.model`
@@ -91,11 +91,12 @@ const generateBatchWithRepair = async (
   providerAdapter: Awaited<ReturnType<typeof loadProviderAdapter>>,
   batch: ApiEndpoint[],
   context: GenerateContext,
-  options: Pick<GenerateOptions, 'settings' | 'signal' | 'onBatchHeartbeat'> & { provider: ExtensionSettings['provider']; batchIndex: number; totalBatches: number; generatedTests: GeneratedTestCase[]; phase?: 'generate' | 'backfill' }
+  options: Pick<GenerateOptions, 'settings' | 'signal' | 'onBatchHeartbeat'> & { provider: ExtensionSettings['provider']; batchIndex: number; totalBatches: number; generatedTests: GeneratedTestCase[]; phase?: 'generate' | 'backfill'; tokenUsage?: TokenUsage }
 ): Promise<{ tests: GeneratedTestCase[]; diagnostics: BatchGenerationDiagnostics }> => {
   const baseProviderOptions = {
-    apiKey: getProviderKey(options.settings, options.provider),
+    apiKey: providerKeyFor(options.settings, options.provider),
     model: resolveModelForProvider(options.settings, options.provider),
+    baseUrl: options.provider === 'openai' ? options.settings.openAiBaseUrl : undefined,
     temperature: options.settings.temperature,
     signal: options.signal,
     timeoutMs: options.settings.timeoutMs,
@@ -120,6 +121,7 @@ const generateBatchWithRepair = async (
   };
 
   const firstPass = await providerAdapter.generateTests(batch, context, { ...baseProviderOptions, onHeartbeat: makeHeartbeat('generate') });
+  accumulateUsage(options.tokenUsage, firstPass.usage);
   let normalized = normalizeGeneratedTests(firstPass.tests, options.settings.includeCategories, batch);
   let quality = assessGeneratedTestQuality(batch, normalized, options.settings.includeCategories);
 
@@ -148,6 +150,7 @@ const generateBatchWithRepair = async (
       currentTests: normalized,
       repairIssues: quality.issues
     });
+    accumulateUsage(options.tokenUsage, repaired.usage);
 
     const repairedNormalized = normalizeGeneratedTests(repaired.tests, options.settings.includeCategories, batch);
     const constrainedRepair = mergeSafeRepairs(normalized, repairedNormalized, batch, quality.issues);
@@ -181,6 +184,8 @@ export interface GenerationResult {
   diagnostics: BatchGenerationDiagnostics[];
   /** Assessment over ALL endpoints after generation + coverage backfill. */
   finalAssessment: BatchQualityAssessment;
+  /** Total provider token usage across all generation + repair calls in this run. */
+  tokenUsage?: TokenUsage;
 }
 
 /**
@@ -321,10 +326,21 @@ export const renderGeneratedFiles = (
   return files;
 };
 
+const isRepairableFailure = (failure: ValidationSummary['results'][number]['failures'][number]): boolean =>
+  failure.type !== 'network';
+
+/** The test is at fault (not the API, not the network). Results from before triage existed
+ *  have no verdict; for those, anything but a connection failure counts. */
+const canRepair = (result: ValidationSummary['results'][number]): boolean =>
+  !result.success &&
+  (result.verdict === 'test' || (!result.verdict && result.failures.some(isRepairableFailure)));
+
 const validationFailuresToIssues = (summary: ValidationSummary, endpointId: string): QualityIssue[] => {
-  const endpointResults = summary.results.filter((result) => result.endpointId === endpointId && !result.success);
+  // Never show the model a likely API bug as something to "fix" — it would rewrite the test to
+  // expect the bug.
+  const endpointResults = summary.results.filter((result) => result.endpointId === endpointId && canRepair(result));
   return endpointResults.flatMap((result) =>
-    result.failures.map((failure) => ({
+    result.failures.filter(isRepairableFailure).map((failure) => ({
       code: failure.type === 'auth' ? 'execution-auth' as const : failure.type === 'status' ? 'execution-status' as const : 'execution-body' as const,
       severity: 'error' as const,
       message: `${result.title}: ${failure.message}`,
@@ -341,7 +357,11 @@ export const repairTestsFromValidation = async (options: {
   validationSummary: ValidationSummary;
   signal?: AbortSignal;
 }): Promise<GeneratedTestCase[]> => {
-  const failingEndpointIds = [...new Set(options.validationSummary.results.filter((result) => !result.success).map((result) => result.endpointId))];
+  // Only failures the TEST can fix. A connection failure means the server was down — asking the
+  // model to "repair" that wastes a paid call and can corrupt a correct test.
+  const failingEndpointIds = [...new Set(
+    options.validationSummary.results.filter(canRepair).map((result) => result.endpointId)
+  )];
   if (!failingEndpointIds.length) {
     return options.tests;
   }
@@ -373,7 +393,7 @@ export const repairTestsFromValidation = async (options: {
     let repairedBatch: GeneratedTestCase[] | null = null;
 
     for (const provider of providersToTry) {
-      const apiKey = getProviderKey(options.settings, provider);
+      const apiKey = providerKeyFor(options.settings, provider);
       if (!apiKey) {
         continue;
       }
@@ -383,6 +403,9 @@ export const repairTestsFromValidation = async (options: {
         const generated = await adapter.generateTests(batch, context, {
           apiKey,
           model: resolveModelForProvider(options.settings, provider),
+          // Without this, repairs for local models / OpenAI-compatible gateways went to
+          // api.openai.com, failed, and silently kept the broken test.
+          baseUrl: provider === 'openai' ? options.settings.openAiBaseUrl : undefined,
           temperature: options.settings.temperature,
           signal: options.signal,
           timeoutMs: options.settings.timeoutMs,
@@ -426,6 +449,7 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
   const startBatch = Math.max(options.startBatch ?? 0, 0);
   const generatedTests: GeneratedTestCase[] = [...(options.initialTests ?? [])];
   const diagnostics: BatchGenerationDiagnostics[] = [];
+  const tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
 
   const allProviders: Array<ExtensionSettings['provider']> = ['openai', 'claude', 'gemini'];
   const providersToTry = options.settings.enableProviderFallback
@@ -440,7 +464,7 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
     let lastError: unknown = null;
 
     for (const provider of providersToTry) {
-      if (!getProviderKey(options.settings, provider)) {
+      if (!providerKeyFor(options.settings, provider)) {
         continue;
       }
       try {
@@ -450,7 +474,8 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
           provider,
           batchIndex: index,
           totalBatches: chunks.length,
-          generatedTests: [...generatedTests]
+          generatedTests: [...generatedTests],
+          tokenUsage
         });
         break;
       } catch (err) {
@@ -505,7 +530,7 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
     for (let chunkIndex = 0; chunkIndex < backfillChunks.length; chunkIndex += 1) {
       const batch = backfillChunks[chunkIndex];
       for (const provider of providersToTry) {
-        if (!getProviderKey(options.settings, provider)) {
+        if (!providerKeyFor(options.settings, provider)) {
           continue;
         }
         try {
@@ -518,7 +543,8 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
             // than an "N/total" batch counter (which would otherwise read e.g. "16/12").
             batchIndex: Math.max(0, chunks.length - 1),
             totalBatches: chunks.length,
-            generatedTests: [...generatedTests]
+            generatedTests: [...generatedTests],
+            tokenUsage
           });
           generatedTests.push(...result.tests);
           break;
@@ -556,7 +582,8 @@ export const generateTestSuite = async (options: GenerateOptions): Promise<Gener
     files,
     totalBatches: chunks.length,
     diagnostics,
-    finalAssessment
+    finalAssessment,
+    tokenUsage: tokenUsage.inputTokens || tokenUsage.outputTokens ? tokenUsage : undefined
   };
 };
 

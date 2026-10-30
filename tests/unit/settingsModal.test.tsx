@@ -21,6 +21,8 @@ const renderModal = (overrides?: Partial<Parameters<typeof SettingsModal>[0]>) =
     onImportSettings: vi.fn(),
     onDownloadRunner: vi.fn(),
     onCheckLocalRunner: vi.fn(),
+    onTestKey: vi.fn(async () => ({ ok: true, message: 'ok' })),
+    onPickFolder: vi.fn(async () => ({ path: '/Users/me/code' })),
     runnerCheck: { checking: false }
   };
   render(
@@ -100,5 +102,76 @@ describe('SettingsModal', () => {
     const frameworkSelect = screen.getByDisplayValue('Jest');
     fireEvent.change(frameworkSelect, { target: { value: 'pytest' } });
     expect(onPatchSettings).toHaveBeenCalledWith(expect.objectContaining({ framework: 'pytest' }));
+  });
+
+  it('lists local servers in the Provider dropdown and switches to them', () => {
+    const { onPatchSettings } = renderModal();
+    const select = screen.getByDisplayValue('OpenAI');
+    expect(screen.getByRole('option', { name: 'Ollama (local)' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'LM Studio (local)' })).toBeTruthy();
+    fireEvent.change(select, { target: { value: 'ollama' } });
+    expect(onPatchSettings).toHaveBeenCalledWith({
+      provider: 'openai',
+      openAiBaseUrl: 'http://localhost:11434',
+      model: 'qwen2.5-coder:7b'
+    });
+  });
+
+  it('shows a saved local setup as that local provider, with no API key field', () => {
+    renderModal({
+      appState: makeAppState({ settings: makeSettings({ provider: 'openai', openAiBaseUrl: 'http://127.0.0.1:1234' }) })
+    });
+    expect(screen.getByDisplayValue('LM Studio (local)')).toBeTruthy();
+    expect(screen.getByText('Server URL')).toBeTruthy();
+    expect(screen.queryByPlaceholderText('Paste provider API key')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Test connection' })).toBeTruthy();
+  });
+
+  it('switching back to hosted OpenAI stops pointing at localhost', () => {
+    const { onPatchSettings } = renderModal({
+      appState: makeAppState({ settings: makeSettings({ provider: 'openai', openAiBaseUrl: 'http://localhost:11434' }) })
+    });
+    fireEvent.change(screen.getByDisplayValue('Ollama (local)'), { target: { value: 'openai' } });
+    expect(onPatchSettings).toHaveBeenCalledWith(expect.objectContaining({ provider: 'openai', openAiBaseUrl: 'https://api.openai.com' }));
+  });
+
+  it("doesn't show a local server's models as the OpenAI account's", () => {
+    renderModal({
+      appState: makeAppState({
+        settings: makeSettings({
+          provider: 'openai',
+          openAiBaseUrl: 'https://api.openai.com',
+          openAiKey: '',
+          availableModels: { ollama: ['qwen2.5-coder:7b'] }
+        })
+      })
+    });
+    expect(screen.getByText(/Suggested models/)).toBeTruthy();
+    expect(screen.queryByText(/available on your account/)).toBeNull();
+  });
+
+  it('sets where repos are cloned via the folder picker', async () => {
+    const { onPatchSettings } = renderModal();
+    fireEvent.click(screen.getByRole('button', { name: 'Browse…' }));
+    await vi.waitFor(() => expect(onPatchSettings).toHaveBeenCalledWith({ cloneRoot: '/Users/me/code' }));
+  });
+
+  it('adds a search folder without duplicating it', async () => {
+    const { onPatchSettings } = renderModal({
+      appState: makeAppState({ settings: makeSettings({ cloneSearchRoots: ['/Users/me/work'] }) })
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add folder…' }));
+    await vi.waitFor(() =>
+      expect(onPatchSettings).toHaveBeenCalledWith({ cloneSearchRoots: ['/Users/me/work', '/Users/me/code'] })
+    );
+  });
+
+  it('flags a legacy global repo path and lets the user clear it', () => {
+    const { onPatchSettings } = renderModal({
+      appState: makeAppState({ settings: makeSettings({ localRepoPath: '/Users/me/old' }) })
+    });
+    expect(screen.getByText(/Legacy repo path/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(onPatchSettings).toHaveBeenCalledWith({ localRepoPath: '' });
   });
 });

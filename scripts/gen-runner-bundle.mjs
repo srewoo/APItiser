@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repoParent = path.resolve(root, '..');
 
-const NATIVE_HOST_FILES = ['apitiser-runner.mjs', 'install.sh', 'install.ps1', 'INSTALL.md'];
+const NATIVE_HOST_FILES = ['apitiser-runner.mjs', 'stack.mjs', 'codeEdits.mjs', 'install.sh', 'install.ps1', 'INSTALL.md'];
 const isExec = (p) => /\.(sh|mjs)$/.test(p);
 
 const walk = (dir, baseInBundle) => {
